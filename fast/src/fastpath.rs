@@ -233,6 +233,36 @@ pub fn decode_pair_padded(e: &[u8], u: &[u8]) -> (Option<u64>, Option<u64>) {
 
 /// The ID string the generator writes for `value` (already scrambled).
 pub fn encode(prefix: u8, value: u64, out: &mut Vec<u8>) {
+    if value > M40 {
+        return encode_slow(prefix, value, out);
+    }
+    // Two base-36 digits per table entry: 36^2 = 1296 pairs.
+    const PAIRS: [[u8; 2]; 1296] = {
+        const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        let mut t = [[0u8; 2]; 1296];
+        let mut i = 0;
+        while i < 1296 {
+            t[i] = [DIGITS[i / 36], DIGITS[i % 36]];
+            i += 1;
+        }
+        t
+    };
+    // value < 2^40 < 36^8: eight digits, most significant first.
+    let hi = (value / 1_679_616) as usize;
+    let lo = (value % 1_679_616) as usize;
+    let mut buf = [0u8; 8];
+    buf[0..2].copy_from_slice(&PAIRS[hi / 1296]);
+    buf[2..4].copy_from_slice(&PAIRS[hi % 1296]);
+    buf[4..6].copy_from_slice(&PAIRS[lo / 1296]);
+    buf[6..8].copy_from_slice(&PAIRS[lo % 1296]);
+    let zeros = (u64::from_be_bytes(buf) ^ 0x3030_3030_3030_3030).leading_zeros() as usize / 8;
+    let skip = zeros.min(7);
+    out.clear();
+    out.push(prefix);
+    out.extend_from_slice(&buf[skip..]);
+}
+
+fn encode_slow(prefix: u8, value: u64, out: &mut Vec<u8>) {
     const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let mut buf = [0u8; 13];
     let mut at = buf.len();
@@ -491,6 +521,8 @@ const _: () = assert!(std::mem::size_of::<Slot>() == 16 && std::mem::align_of::<
 
 pub struct People {
     pub slots: Vec<Slot>,
+    /// A `LINKED` person's name: its component's byte-wise smallest ID, packed.
+    pub name: Vec<std::sync::atomic::AtomicU64>,
 }
 
 impl People {
@@ -503,7 +535,12 @@ impl People {
         let slots = unsafe {
             Vec::from_raw_parts(zeroed.as_mut_ptr() as *mut Slot, zeroed.len(), zeroed.capacity())
         };
-        Self { slots }
+        let mut zeroed = std::mem::ManuallyDrop::new(vec![0u64; cap]);
+        // SAFETY: AtomicU64 has the layout of u64, and zero is a valid value.
+        let name = unsafe {
+            Vec::from_raw_parts(zeroed.as_mut_ptr() as *mut std::sync::atomic::AtomicU64, zeroed.len(), zeroed.capacity())
+        };
+        Self { slots, name }
     }
 
     #[inline(always)]
@@ -571,6 +608,23 @@ mod tests {
             }
             let (e, u) = (&bufs[0][..lens[0]], &bufs[1][..lens[1]]);
             assert_eq!(decode_pair_padded(e, u), (decode(e, b'e'), decode(u, b'u')), "{:?} {:?}", e, u);
+        }
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        let mut rng = 0xC2B2_AE3D_27D4_EB4Fu64;
+        for i in 0..400_000u64 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let v = match i % 4 {
+                0 => rng & M40,
+                1 => rng % 1_679_616,
+                2 => rng % 1296,
+                _ => rng % 50,
+            };
+            encode(b'u', v, &mut a);
+            encode_slow(b'u', v, &mut b);
+            assert_eq!(a, b, "{v}");
         }
         let mut out = Vec::new();
         for v in [0u64, 1, 35, 36, 1295, 1 << 20, M40 - 1, M40] {

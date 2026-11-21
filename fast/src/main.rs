@@ -292,6 +292,7 @@ struct Catalog {
     campaign_channels: Vec<Vec<u8>>,
     campaign_arena: FallbackArena,
     campaigns: IdTable, // campaign_id -> campaign_idx (1..=C)
+    packed_campaigns: PackedMap, // the same, for packable campaign IDs
     link_arena: FallbackArena,
     links: IdTable, // linked user_id -> canonical index in `canonical_links`
     canonical_links: Vec<PackedId>, // index -> canonical PackedId in `link_arena`
@@ -381,12 +382,16 @@ fn build_catalog(data_dir: &Path) -> io::Result<Catalog> {
 
     let mut campaign_arena = FallbackArena::new();
     let mut campaigns = IdTable::with_capacity(raw_campaigns.len().max(16));
+    let mut packed_campaigns = PackedMap::new(raw_campaigns.len());
     for (i, (cid, chan)) in raw_campaigns.into_iter().enumerate() {
         let idx = (i + 1) as u32;
         campaign_names.push(cid.to_vec());
         campaign_channels.push(chan.to_vec());
         let mut tmp_arena = FallbackArena::new();
         let packed = tmp_arena.pack_or_push(cid);
+        if packed.is_packed() {
+            packed_campaigns.insert(packed.0, idx);
+        }
         campaigns.insert_or_get(packed, &tmp_arena.bytes, &mut campaign_arena, |_| idx);
     }
 
@@ -402,6 +407,7 @@ fn build_catalog(data_dir: &Path) -> io::Result<Catalog> {
         campaign_channels,
         campaign_arena,
         campaigns,
+        packed_campaigns,
         link_arena: FallbackArena::new(),
         links: IdTable::with_capacity(16),
         canonical_links: Vec::new(),
@@ -726,6 +732,12 @@ fn classify_people(catalog: &Catalog, keys: &Keys, people: &People, ncpu: usize)
                         }
                     }
                     people.slots[p].mask.fetch_or(1 << (u & 511), AtomicOrdering::Relaxed);
+                    let canon = catalog.canonical_links[i];
+                    if canon.is_packed() {
+                        people.name[p].store(canon.0, AtomicOrdering::Relaxed);
+                    } else {
+                        people.complex(p);
+                    }
                     let _ = people.slots[p].status.compare_exchange(
                         fastpath::UNLINKED,
                         fastpath::LINKED,
@@ -1129,74 +1141,51 @@ fn run_pipeline(
         fast_workers.push(arena);
     }
     let by_bucket: Vec<Mutex<Vec<Vec<FastRec>>>> = by_bucket.into_iter().map(Mutex::new).collect();
-    let bucket_winners: Vec<Mutex<Vec<FastRec>>> =
-        (0..n_buckets).map(|_| Mutex::new(Vec::new())).collect();
+    // Claims first, from every valid row of each bucket (a superset of the
+    // winners, so it can only mark more people complex): the alias check and
+    // a claim of the bucket, with a small per-bucket filter so each user is
+    // checked and claimed about once. Dedup and sessions then run in one pass
+    // per bucket after this barrier, without materialising winners.
     if let Some((_, people)) = fast_ref {
         let next = AtomicUsize::new(0);
         thread::scope(|scope| {
             for _ in 0..ncpu {
                 scope.spawn(|| {
-                    let blank = FastRec { key: 0, user: 0, time_price: 0 };
-                    let mut slot = vec![blank; Q];
-                    let mut gen_of = vec![0u32; Q];
-                    let mut stamp = 0u32;
+                    let mut seen = vec![u64::MAX; 4096];
                     loop {
                         let b = next.fetch_add(1, AtomicOrdering::Relaxed);
                         if b >= n_buckets {
                             break;
                         }
-                        stamp += 1;
-                        let mut rows = 0usize;
-                        let parts = std::mem::take(&mut *by_bucket[b].lock().unwrap());
-                        for part in &parts {
-                            rows += part.len();
-                            for r in part {
-                                let s = r.low();
-                                if gen_of[s] != stamp {
-                                    gen_of[s] = stamp;
-                                    slot[s] = *r;
-                                } else if r.ingest() < slot[s].ingest() {
-                                    slot[s] = *r;
-                                }
-                            }
-                        }
-                        for part in parts {
-                            release(part);
-                        }
-                        if rows == 0 {
-                            continue;
-                        }
                         let tag = b as u32 + 1;
-                        let mut winners = Vec::with_capacity(rows);
-                        let mut last_claimed = usize::MAX;
-                        for s in 0..Q {
-                            if gen_of[s] != stamp {
-                                continue;
-                            }
-                            let r = &slot[s];
-                            if r.is_invalid() {
-                                continue;
-                            }
-                            winners.push(*r);
-                            if !r.is_opaque()
-                                && people.check_alias(r.counter())
-                                && (r.counter() >> 9) as usize != last_claimed
-                            {
-                                let p = (r.counter() >> 9) as usize;
-                                last_claimed = p;
-                                if let Err(cur) = people.slots[p].claim.compare_exchange(
-                                    0,
-                                    tag,
-                                    AtomicOrdering::Relaxed,
-                                    AtomicOrdering::Relaxed,
-                                ) {
-                                    if cur != tag {
-                                        people.complex(p);
+                        let parts = by_bucket[b].lock().unwrap();
+                        for part in parts.iter() {
+                            for r in part {
+                                if r.is_invalid() || r.is_opaque() {
+                                    continue;
+                                }
+                                let u = r.counter();
+                                let key = ((b as u64) << 40) | u;
+                                let idx = (((u >> 9) ^ u) & 4095) as usize;
+                                if seen[idx] == key {
+                                    continue;
+                                }
+                                seen[idx] = key;
+                                if people.check_alias(u) {
+                                    let p = (u >> 9) as usize;
+                                    if let Err(cur) = people.slots[p].claim.compare_exchange(
+                                        0,
+                                        tag,
+                                        AtomicOrdering::Relaxed,
+                                        AtomicOrdering::Relaxed,
+                                    ) {
+                                        if cur != tag {
+                                            people.complex(p);
+                                        }
                                     }
                                 }
                             }
                         }
-                        *bucket_winners[b].lock().unwrap() = winners;
                     }
                 });
             }
@@ -1260,11 +1249,12 @@ fn run_pipeline(
                         }
                         tmp_arena.bytes.clear();
                         let camp_pid = tmp_arena.pack_or_push_padded(campaign_id);
-                        let Some(camp_idx) = catalog.campaigns.get(
-                            camp_pid,
-                            &tmp_arena.bytes,
-                            &catalog.campaign_arena.bytes,
-                        ) else {
+                        let camp = if camp_pid.is_packed() {
+                            catalog.packed_campaigns.get(camp_pid.0)
+                        } else {
+                            catalog.campaigns.get(camp_pid, &tmp_arena.bytes, &catalog.campaign_arena.bytes)
+                        };
+                        let Some(camp_idx) = camp else {
                             return;
                         };
 
@@ -1415,8 +1405,8 @@ fn run_pipeline(
         thread::scope(|scope| {
             for worker_id in 0..ncpu {
                 let (next, exact_ev, exact_cl) = (&next, &exact_ev, &exact_cl);
-                let (fast_workers, fast_click_workers, bucket_winners) =
-                    (&fast_workers, &fast_click_workers, &bucket_winners);
+                let (fast_workers, fast_click_workers, by_bucket) =
+                    (&fast_workers, &fast_click_workers, &by_bucket);
                 let (global_camp_grid, global_camp_extra, io_error, total_user_rows, fast_people) =
                     (&global_camp_grid, &global_camp_extra, &io_error, &total_user_rows, &fast_people);
                 let catalog = &catalog;
@@ -1446,7 +1436,14 @@ fn run_pipeline(
                     let mut scp: Vec<u32> = Vec::new();
                     let mut sc: Vec<(i64, PackedId, u32)> = Vec::new();
                     let mut counts: Vec<u32> = Vec::new();
+                    // (person, first index into `se`) per person run, in person order.
+                    let mut runs: Vec<(u32, u32)> = Vec::new();
                     let mut served = 0usize;
+                    let mut tsub = [0u128; 5];
+                    let blank = FastRec { key: 0, user: 0, time_price: 0 };
+                    let mut slot = vec![blank; Q];
+                    let mut gen_of = vec![0u32; Q];
+                    let mut stamp = 0u32;
 
                     let mut exact_event = |user: &[u8], ts: i64, price: u32, cat: u32, scratch: &mut FallbackArena| {
                         scratch.bytes.clear();
@@ -1473,10 +1470,45 @@ fn run_pipeline(
                         if b >= n_buckets {
                             break;
                         }
-                        let winners = std::mem::take(&mut *bucket_winners[b].lock().unwrap());
-                        fast_evs.clear();
+                        // Dedup: every copy of an event shares its counter, so a
+                        // direct array per bucket keeps the earliest ingest exactly;
+                        // winners then come out in counter order, which for generator
+                        // people is time order, so the sink's sort is a single pass.
+                        stamp += 1;
+                        let q0 = std::time::Instant::now();
+                        let parts = std::mem::take(&mut *by_bucket[b].lock().unwrap());
+                        let mut rows = 0usize;
+                        for part in &parts {
+                            rows += part.len();
+                            for r in part {
+                                let s = r.low();
+                                if gen_of[s] != stamp {
+                                    gen_of[s] = stamp;
+                                    slot[s] = *r;
+                                } else if r.ingest() < slot[s].ingest() {
+                                    slot[s] = *r;
+                                }
+                            }
+                        }
+                        for part in parts {
+                            release(part);
+                        }
+                        let q1 = std::time::Instant::now();
+                        tsub[0] += (q1 - q0).as_nanos();
                         fast_cls.clear();
-                        for r in &winners {
+                        se.clear();
+                        runs.clear();
+                        // Generator people own contiguous counter ranges in person
+                        // order, so winners arrive grouped by person with person
+                        // indices rising: runs come straight from this walk. Any
+                        // bucket where an index falls is regrouped by sorting below.
+                        let mut cur_p = u32::MAX;
+                        let mut rising = true;
+                        for s in 0..if rows > 0 { Q } else { 0 } {
+                            if gen_of[s] != stamp || slot[s].is_invalid() {
+                                continue;
+                            }
+                            let r = &slot[s];
                             let ts = window_start + r.ts_off();
                             if r.is_opaque() {
                                 let (t, off) = r.opaque_ref();
@@ -1488,9 +1520,17 @@ fn run_pipeline(
                                 keys.user_id(r.counter(), &mut idbuf);
                                 exact_event(&idbuf, ts, r.price(), r.cat(), &mut scratch);
                             } else {
-                                fast_evs.push(((r.counter() >> 9) as u32, ts, r.price(), r.cat()));
+                                let p = (r.counter() >> 9) as u32;
+                                if p != cur_p {
+                                    rising &= cur_p == u32::MAX || p > cur_p;
+                                    runs.push((p, se.len() as u32));
+                                    cur_p = p;
+                                }
+                                se.push((ts, r.price(), r.cat()));
                             }
                         }
+                        let q2 = std::time::Instant::now();
+                        tsub[1] += (q2 - q1).as_nanos();
                         for clicks in fast_click_workers.iter() {
                             for c in &clicks[b] {
                                 if people.is_complex((c.user >> 9) as usize) {
@@ -1501,58 +1541,103 @@ fn run_pipeline(
                                 }
                             }
                         }
-                        release(winners);
-                        if fast_evs.is_empty() {
+                        if se.is_empty() {
                             for &(p, ts, cid, camp) in &fast_cls {
                                 keys.user_id((p as u64) << 9, &mut idbuf);
                                 exact_click(&idbuf, (ts, cid, camp), &mut scratch);
                             }
                             continue;
                         }
-                        // Group by person: counting sort over the bucket's person range.
-                        let lo = fast_evs.iter().map(|e| e.0).min().unwrap() as usize;
-                        let hi = fast_evs.iter().map(|e| e.0).max().unwrap() as usize;
+                        if !rising {
+                            // Group by person: counting sort over the bucket's person range.
+                            fast_evs.clear();
+                            for k in 0..runs.len() {
+                                let (p, at) = runs[k];
+                                let end = runs.get(k + 1).map_or(se.len(), |r| r.1 as usize);
+                                fast_evs.extend(se[at as usize..end].iter().map(|e| (p, e.0, e.1, e.2)));
+                            }
+                            let lo = runs.iter().map(|r| r.0).min().unwrap() as usize;
+                            let hi = runs.iter().map(|r| r.0).max().unwrap() as usize;
+                            let span = hi - lo + 1;
+                            sp.clear();
+                            se.clear();
+                            if span <= 8 * Q {
+                                counts.clear();
+                                counts.resize(span + 1, 0);
+                                for e in &fast_evs {
+                                    counts[e.0 as usize - lo + 1] += 1;
+                                }
+                                for i in 1..=span {
+                                    counts[i] += counts[i - 1];
+                                }
+                                sp.resize(fast_evs.len(), 0);
+                                se.resize(fast_evs.len(), (0, 0, 0));
+                                for e in &fast_evs {
+                                    let k = e.0 as usize - lo;
+                                    let at = counts[k] as usize;
+                                    sp[at] = e.0;
+                                    se[at] = (e.1, e.2, e.3);
+                                    counts[k] += 1;
+                                }
+                            } else {
+                                fast_evs.sort_unstable_by_key(|e| e.0);
+                                sp.extend(fast_evs.iter().map(|e| e.0));
+                                se.extend(fast_evs.iter().map(|e| (e.1, e.2, e.3)));
+                            }
+                            runs.clear();
+                            for (i, &p) in sp.iter().enumerate() {
+                                if runs.last().is_none_or(|r| r.0 != p) {
+                                    runs.push((p, i as u32));
+                                }
+                            }
+                        }
+                        // Runs are now in strictly rising person order.
+                        let lo = runs[0].0 as usize;
+                        let hi = runs[runs.len() - 1].0 as usize;
                         let span = hi - lo + 1;
+                        // Clicks by person: counting sort over the same person range;
+                        // a click outside it has no fast event here and goes exact below.
+                        scp.clear();
+                        sc.clear();
                         if span <= 8 * Q {
                             counts.clear();
                             counts.resize(span + 1, 0);
-                            for e in &fast_evs {
-                                counts[e.0 as usize - lo + 1] += 1;
+                            let mut inside = 0usize;
+                            for c in &fast_cls {
+                                let p = c.0 as usize;
+                                if p >= lo && p <= hi {
+                                    counts[p - lo + 1] += 1;
+                                    inside += 1;
+                                }
                             }
                             for i in 1..=span {
                                 counts[i] += counts[i - 1];
                             }
-                            sp.clear();
-                            sp.resize(fast_evs.len(), 0);
-                            se.clear();
-                            se.resize(fast_evs.len(), (0, 0, 0));
-                            for e in &fast_evs {
-                                let k = e.0 as usize - lo;
-                                let at = counts[k] as usize;
-                                sp[at] = e.0;
-                                se[at] = (e.1, e.2, e.3);
-                                counts[k] += 1;
+                            scp.resize(inside, 0);
+                            sc.resize(inside, (0, PackedId(0), 0));
+                            for c in &fast_cls {
+                                let p = c.0 as usize;
+                                if p >= lo && p <= hi {
+                                    let at = counts[p - lo] as usize;
+                                    scp[at] = c.0;
+                                    sc[at] = (c.1, PackedId(c.2), c.3);
+                                    counts[p - lo] += 1;
+                                } else {
+                                    keys.user_id((c.0 as u64) << 9, &mut idbuf);
+                                    exact_click(&idbuf, (c.1, c.2, c.3), &mut scratch);
+                                }
                             }
                         } else {
-                            fast_evs.sort_unstable_by_key(|e| e.0);
-                            sp.clear();
-                            se.clear();
-                            sp.extend(fast_evs.iter().map(|e| e.0));
-                            se.extend(fast_evs.iter().map(|e| (e.1, e.2, e.3)));
+                            fast_cls.sort_unstable_by_key(|c| c.0);
+                            scp.extend(fast_cls.iter().map(|c| c.0));
+                            sc.extend(fast_cls.iter().map(|c| (c.1, PackedId(c.2), c.3)));
                         }
-                        fast_cls.sort_unstable_by_key(|c| c.0);
-                        scp.clear();
-                        sc.clear();
-                        scp.extend(fast_cls.iter().map(|c| c.0));
-                        sc.extend(fast_cls.iter().map(|c| (c.1, PackedId(c.2), c.3)));
+                        let q3 = std::time::Instant::now();
+                        tsub[2] += (q3 - q2).as_nanos();
                         let mut ci = 0usize;
-                        let mut i = 0usize;
-                        while i < sp.len() {
-                            let p = sp[i];
-                            let mut j = i + 1;
-                            while j < sp.len() && sp[j] == p {
-                                j += 1;
-                            }
+                        for k in 0..runs.len() {
+                            let (p, i) = (runs[k].0, runs[k].1 as usize);
+                            let j = runs.get(k + 1).map_or(se.len(), |r| r.1 as usize);
                             // Clicks of people with no fast event here cannot be claimed
                             // by this bucket; route any such click exactly anyway.
                             while ci < scp.len() && scp[ci] < p {
@@ -1567,19 +1652,21 @@ fn run_pipeline(
                             }
                             let pu = p as usize;
                             if people.slots[pu].status.load(AtomicOrdering::Relaxed) == fastpath::LINKED {
-                                // The component's byte-wise smallest ID.
-                                let node = people.slots[pu].node.load(AtomicOrdering::Relaxed) as usize - 1;
+                                // The component's byte-wise smallest ID (packed: a linked
+                                // person's IDs all decode, so they all pack).
                                 let mut tmp = [0u8; 10];
-                                let bytes = catalog.canonical_links[node]
-                                    .as_bytes(&catalog.link_arena.bytes, &mut tmp);
+                                let name = PackedId(people.name[pu].load(AtomicOrdering::Relaxed));
+                                let bytes = id::unpack(name, &mut tmp);
                                 idbuf.clear();
                                 idbuf.extend_from_slice(bytes);
                             } else {
                                 keys.user_id((p as u64) << 9, &mut idbuf);
                             }
-                            sink.person(&idbuf, &mut se[i..j], &mut sc[ci..cj], &[]);
+                            // Fast click IDs are all packed, so (ts asc, ID desc) is a
+                            // plain key order; the sink then skips its comparator sort.
+                            sc[ci..cj].sort_unstable_by_key(|c| (c.0, std::cmp::Reverse(c.1.0)));
+                            sink.person(&idbuf, &mut se[i..j], &mut sc[ci..cj], &[], true);
                             served += 1;
-                            i = j;
                             ci = cj;
                         }
                         while ci < scp.len() {
@@ -1588,8 +1675,10 @@ fn run_pipeline(
                             exact_click(&idbuf, (ts, cid.0, camp), &mut scratch);
                             ci += 1;
                         }
+                        tsub[3] += q3.elapsed().as_nanos();
                     }
                     fast_people.fetch_add(served, AtomicOrdering::Relaxed);
+                    let q4 = std::time::Instant::now();
 
                     let ucols = &sink.ucols;
                     if ucols.len() > 0 {
@@ -1619,6 +1708,10 @@ fn run_pipeline(
                             g.revenue_cents += l.revenue_cents;
                             g.assisted_sessions += l.assisted_sessions;
                         }
+                    }
+                    tsub[4] += q4.elapsed().as_nanos();
+                    if std::env::var_os("SHOPPING_TIMING").is_some() {
+                        eprintln!("sub w{worker_id} dedup={} walk={} clicks={} sink={} flush={}", tsub[0] / 1_000_000, tsub[1] / 1_000_000, tsub[2] / 1_000_000, tsub[3] / 1_000_000, tsub[4] / 1_000_000);
                     }
                     exact_ev.lock().unwrap().push(ev_out);
                     exact_cl.lock().unwrap().push(cl_out);
@@ -1741,7 +1834,7 @@ fn run_pipeline(
                     for (p_idx, evs) in person_events.iter_mut().enumerate() {
                         let mut tmp = [0u8; 10];
                         let name = person_ids[p_idx].as_bytes(&shard_arena.bytes, &mut tmp);
-                        sink.person(name, evs, &mut person_clicks[p_idx], &shard_arena.bytes);
+                        sink.person(name, evs, &mut person_clicks[p_idx], &shard_arena.bytes, false);
                     }
                 }
 

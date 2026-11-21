@@ -78,6 +78,7 @@ impl Sink {
         evs: &mut [(i64, u32, u32)],
         clicks: &mut [(i64, PackedId, u32)],
         click_arena: &[u8],
+        clicks_sorted: bool,
     ) {
         self.sessions_buf.clear();
 
@@ -221,11 +222,14 @@ impl Sink {
             }
         } else {
             // Sort by ts ascending, ID descending: the last eligible row wins the tie.
-            let arena_ref = click_arena;
-            clicks.sort_unstable_by(|a, b| {
-                a.0.cmp(&b.0)
-                    .then_with(|| b.1.cmp_exact(a.1, arena_ref, arena_ref))
-            });
+            // (`clicks_sorted`: the caller already sorted packed IDs that way.)
+            if !clicks_sorted {
+                let arena_ref = click_arena;
+                clicks.sort_unstable_by(|a, b| {
+                    a.0.cmp(&b.0)
+                        .then_with(|| b.1.cmp_exact(a.1, arena_ref, arena_ref))
+                });
+            }
 
             let mut left = 0usize;
             let mut right = 0usize;

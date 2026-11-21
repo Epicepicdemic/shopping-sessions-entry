@@ -4,6 +4,10 @@ use crate::parse::SESSION_GAP_MS;
 pub type Event = (i64, u32, u32);
 
 pub fn order(events: &mut [Event], bins: bool, window_start: i64, window_end: i64) {
+    // Already in time order (the fast path's usual case): nothing to do.
+    if events.windows(2).all(|w| w[0].0 <= w[1].0) {
+        return;
+    }
     let nbin = window_end.saturating_sub(window_start) / SESSION_GAP_MS + 1;
     if !bins || events.len() < 64 || !(1..=2048).contains(&nbin) {
         events.sort_unstable_by_key(|e| e.0);
