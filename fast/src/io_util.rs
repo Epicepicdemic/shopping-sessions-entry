@@ -19,8 +19,26 @@ unsafe extern "C" {
         offset: i64,
     ) -> *mut core::ffi::c_void;
     fn munmap(addr: *mut core::ffi::c_void, len: usize) -> i32;
+    fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
 }
 
+const MADV_SEQUENTIAL: i32 = 2;
+const MADV_DONTNEED: i32 = 4;
+
+/// Give a buffer's whole pages back to the kernel now, from the calling
+/// thread, and never free it: the process ends with `_exit`, so the serial
+/// teardown at exit has less to do. The buffer must not be used again.
+pub fn release<T>(v: Vec<T>) {
+    let bytes = v.capacity() * std::mem::size_of::<T>();
+    let start = (v.as_ptr() as usize).div_ceil(4096) * 4096;
+    let end = (v.as_ptr() as usize + bytes) / 4096 * 4096;
+    if end > start {
+        unsafe {
+            madvise(start as *mut core::ffi::c_void, end - start, MADV_DONTNEED);
+        }
+    }
+    std::mem::forget(v);
+}
 const PROT_READ: i32 = 1;
 const MAP_PRIVATE: i32 = 2;
 const MAP_FAILED: *mut core::ffi::c_void = !0usize as *mut core::ffi::c_void;
@@ -55,6 +73,11 @@ impl MmapFile {
                 0,
             )
         };
+        if ptr != MAP_FAILED {
+            unsafe {
+                madvise(ptr, len, MADV_SEQUENTIAL);
+            }
+        }
         if ptr == MAP_FAILED {
             let fallback = fs::read(path)?;
             Ok(Self {
@@ -109,44 +132,6 @@ pub fn csv_files(folder: &Path) -> Vec<PathBuf> {
     }
     paths.sort();
     paths
-}
-
-/// Open all `*.csv` files in `folder` and split their post-header bytes into
-/// newline-aligned byte ranges of at most `chunk_size` bytes.
-pub fn map_and_split_csvs(
-    folder: &Path,
-    chunk_size: usize,
-) -> io::Result<(Vec<MmapFile>, Vec<(usize, usize, usize)>)> {
-    let paths = csv_files(folder);
-    let mut mmaps = Vec::with_capacity(paths.len());
-    let mut chunks = Vec::new();
-
-    for (file_idx, path) in paths.into_iter().enumerate() {
-        let m = MmapFile::open(&path)?;
-        let bytes = m.as_slice();
-        // Skip first line (the header row)
-        if let Some(nl) = find_newline(bytes) {
-            let mut pos = nl + 1;
-            let end = bytes.len();
-            while pos < end {
-                let target_end = (pos + chunk_size).min(end);
-                let chunk_end = if target_end < end {
-                    match find_newline(&bytes[target_end..]) {
-                        Some(off) => target_end + off + 1,
-                        None => end,
-                    }
-                } else {
-                    end
-                };
-                if chunk_end > pos {
-                    chunks.push((file_idx, pos, chunk_end));
-                }
-                pos = chunk_end;
-            }
-        }
-        mmaps.push(m);
-    }
-    Ok((mmaps, chunks))
 }
 
 /// Iterate over each `\n`-terminated (or EOF-terminated) line in `slice`.

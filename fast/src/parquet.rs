@@ -139,15 +139,6 @@ fn write_col_chunk(
     out.push(0); // end ColumnChunk
 }
 
-pub struct UserDailyRow<'a> {
-    pub user_id: &'a [u8],
-    pub day: i32,
-    pub sessions: i64,
-    pub events: i64,
-    pub revenue_cents: i64,
-    pub top_category: Option<&'a [u8]>,
-}
-
 pub struct CampaignDailyRow<'a> {
     pub campaign_id: &'a [u8],
     pub channel: &'a [u8],
@@ -158,191 +149,190 @@ pub struct CampaignDailyRow<'a> {
     pub assisted_sessions: i64,
 }
 
-pub fn write_user_daily_file(path: &Path, rows: &[UserDailyRow<'_>]) -> io::Result<()> {
-    let n = rows.len();
-    let mut buf = Vec::with_capacity(n * 48 + 1024);
-    buf.extend_from_slice(b"PAR1");
+/// `user_daily` rows kept as flat columns, ready to become Parquet pages.
+/// `ids` already holds the PLAIN BYTE_ARRAY page body (u32 length + bytes).
+#[derive(Default)]
+pub struct UserCols {
+    pub ids: Vec<u8>,
+    pub day: Vec<i32>,
+    pub sessions: Vec<i64>,
+    pub events: Vec<i64>,
+    pub revenue: Vec<i64>,
+    /// Category index, or `u32::MAX` for a null `top_category`.
+    pub top: Vec<u32>,
+}
 
-    let mut chunks = Vec::new();
+impl UserCols {
+    pub fn with_capacity(rows: usize) -> Self {
+        Self {
+            ids: Vec::with_capacity(rows * 14),
+            day: Vec::with_capacity(rows),
+            sessions: Vec::with_capacity(rows),
+            events: Vec::with_capacity(rows),
+            revenue: Vec::with_capacity(rows),
+            top: Vec::with_capacity(rows),
+        }
+    }
+
+    #[inline]
+    pub fn push(&mut self, id: &[u8], day: i32, sessions: i64, events: i64, revenue: i64, top: Option<u32>) {
+        self.ids.extend_from_slice(&(id.len() as u32).to_le_bytes());
+        self.ids.extend_from_slice(id);
+        self.day.push(day);
+        self.sessions.push(sessions);
+        self.events.push(events);
+        self.revenue.push(revenue);
+        self.top.push(top.unwrap_or(u32::MAX));
+    }
+
+    pub fn len(&self) -> usize {
+        self.day.len()
+    }
+}
+
+fn i32_bytes(values: &[i32]) -> &[u8] {
+    // SAFETY: i32 has no padding; Parquet PLAIN is little-endian, as is x86_64/aarch64.
+    unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, values.len() * 4) }
+}
+
+fn i64_bytes(values: &[i64]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, values.len() * 8) }
+}
+
+/// An integer column as INT32 when every value fits (any width is accepted), else INT64.
+enum IntPage<'a> {
+    Narrow(Vec<i32>),
+    Wide(&'a [i64]),
+}
+
+impl IntPage<'_> {
+    fn of(values: &[i64]) -> IntPage<'_> {
+        if values.iter().all(|&v| v >= i32::MIN as i64 && v <= i32::MAX as i64) {
+            IntPage::Narrow(values.iter().map(|&v| v as i32).collect())
+        } else {
+            IntPage::Wide(values)
+        }
+    }
+    fn ptype(&self) -> i32 {
+        match self {
+            IntPage::Narrow(_) => 1,
+            IntPage::Wide(_) => 2,
+        }
+    }
+    fn bytes(&self) -> &[u8] {
+        match self {
+            IntPage::Narrow(v) => i32_bytes(v),
+            IntPage::Wide(v) => i64_bytes(v),
+        }
+    }
+}
+
+fn data_page_header(num_values: i32, body_len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32);
+    let len = body_len as i32;
+    let mut prev = 0i16;
+    write_i32(&mut out, &mut prev, 1, 0); // DATA_PAGE
+    write_i32(&mut out, &mut prev, 2, len);
+    write_i32(&mut out, &mut prev, 3, len);
+    write_field_hdr(&mut out, &mut prev, 5, 12);
+    let mut dp = 0i16;
+    write_i32(&mut out, &mut dp, 1, num_values);
+    write_i32(&mut out, &mut dp, 2, 0); // PLAIN
+    write_i32(&mut out, &mut dp, 3, 3); // RLE definition levels
+    write_i32(&mut out, &mut dp, 4, 3); // RLE repetition levels
+    out.push(0);
+    out.push(0);
+    out
+}
+
+/// Write `user_daily` straight from flat columns: one uncompressed PLAIN page per
+/// column, each page body written from its column buffer without a copy.
+pub fn write_user_daily_cols(path: &Path, cols: &UserCols, categories: &[Vec<u8>]) -> io::Result<()> {
+    let n = cols.len();
+    let mut file = File::create(path)?;
+    file.write_all(b"PAR1")?;
+    let mut offset = 4i64;
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    let mut int_types = [2i32; 3];
 
     if n > 0 {
-        let mut raw = Vec::with_capacity(n * 16);
-        let mut page = Vec::new();
-
-        // 1. user_id (BYTE_ARRAY = 6)
-        raw.clear();
-        for r in rows {
-            raw.extend_from_slice(&(r.user_id.len() as u32).to_le_bytes());
-            raw.extend_from_slice(r.user_id);
-        }
-        page.clear();
-        write_data_page(&mut page, n as i32, &raw);
-        let off1 = buf.len() as i64;
-        buf.extend_from_slice(&page);
-        let mut c1 = Vec::new();
-        write_col_chunk(&mut c1, 6, b"user_id", n as i64, page.len() as i64, off1);
-        chunks.push(c1);
-
-        // 2. day (INT32 = 1)
-        raw.clear();
-        for r in rows {
-            raw.extend_from_slice(&r.day.to_le_bytes());
-        }
-        page.clear();
-        write_data_page(&mut page, n as i32, &raw);
-        let off2 = buf.len() as i64;
-        buf.extend_from_slice(&page);
-        let mut c2 = Vec::new();
-        write_col_chunk(&mut c2, 1, b"day", n as i64, page.len() as i64, off2);
-        chunks.push(c2);
-
-        // 3. sessions (INT64 = 2)
-        raw.clear();
-        for r in rows {
-            raw.extend_from_slice(&r.sessions.to_le_bytes());
-        }
-        page.clear();
-        write_data_page(&mut page, n as i32, &raw);
-        let off3 = buf.len() as i64;
-        buf.extend_from_slice(&page);
-        let mut c3 = Vec::new();
-        write_col_chunk(&mut c3, 2, b"sessions", n as i64, page.len() as i64, off3);
-        chunks.push(c3);
-
-        // 4. events (INT64 = 2)
-        raw.clear();
-        for r in rows {
-            raw.extend_from_slice(&r.events.to_le_bytes());
-        }
-        page.clear();
-        write_data_page(&mut page, n as i32, &raw);
-        let off4 = buf.len() as i64;
-        buf.extend_from_slice(&page);
-        let mut c4 = Vec::new();
-        write_col_chunk(&mut c4, 2, b"events", n as i64, page.len() as i64, off4);
-        chunks.push(c4);
-
-        // 5. revenue_cents (INT64 = 2)
-        raw.clear();
-        for r in rows {
-            raw.extend_from_slice(&r.revenue_cents.to_le_bytes());
-        }
-        page.clear();
-        write_data_page(&mut page, n as i32, &raw);
-        let off5 = buf.len() as i64;
-        buf.extend_from_slice(&page);
-        let mut c5 = Vec::new();
-        write_col_chunk(
-            &mut c5,
-            2,
-            b"revenue_cents",
-            n as i64,
-            page.len() as i64,
-            off5,
-        );
-        chunks.push(c5);
-
-        // 6. top_category (OPTIONAL BYTE_ARRAY = 6)
-        raw.clear();
-        // RLE bit-packed definition levels (bit-width 1):
-        let num_groups = (n + 7) / 8;
-        let mut rle_payload = Vec::with_capacity(num_groups + 8);
-        write_varint(&mut rle_payload, ((num_groups as u64) << 1) | 1);
-        for g in 0..num_groups {
+        // top_category: definition levels as one bit-packed run, then the non-null values.
+        let groups = n.div_ceil(8);
+        let mut top_body = Vec::with_capacity(groups + 16 + n * 4);
+        let mut rle = Vec::with_capacity(groups + 8);
+        write_varint(&mut rle, ((groups as u64) << 1) | 1);
+        for g in 0..groups {
             let mut b = 0u8;
-            for bit in 0..8 {
-                let idx = g * 8 + bit;
-                if idx < n && rows[idx].top_category.is_some() {
+            for (bit, &t) in cols.top[g * 8..(g * 8 + 8).min(n)].iter().enumerate() {
+                if t != u32::MAX {
                     b |= 1 << bit;
                 }
             }
-            rle_payload.push(b);
+            rle.push(b);
         }
-        raw.extend_from_slice(&(rle_payload.len() as u32).to_le_bytes());
-        raw.extend_from_slice(&rle_payload);
-        for r in rows {
-            if let Some(cat) = r.top_category {
-                raw.extend_from_slice(&(cat.len() as u32).to_le_bytes());
-                raw.extend_from_slice(cat);
+        top_body.extend_from_slice(&(rle.len() as u32).to_le_bytes());
+        top_body.extend_from_slice(&rle);
+        for &t in &cols.top {
+            if t != u32::MAX {
+                let cat = &categories[t as usize];
+                top_body.extend_from_slice(&(cat.len() as u32).to_le_bytes());
+                top_body.extend_from_slice(cat);
             }
         }
-        page.clear();
-        write_data_page(&mut page, n as i32, &raw);
-        let off6 = buf.len() as i64;
-        buf.extend_from_slice(&page);
-        let mut c6 = Vec::new();
-        write_col_chunk(
-            &mut c6,
-            6,
-            b"top_category",
-            n as i64,
-            page.len() as i64,
-            off6,
-        );
-        chunks.push(c6);
+        let sessions = IntPage::of(&cols.sessions);
+        let events = IntPage::of(&cols.events);
+        let revenue = IntPage::of(&cols.revenue);
+        int_types = [sessions.ptype(), events.ptype(), revenue.ptype()];
+        let pages: [(&[u8], i32, &[u8]); 6] = [
+            (b"user_id", 6, &cols.ids),
+            (b"day", 1, i32_bytes(&cols.day)),
+            (b"sessions", int_types[0], sessions.bytes()),
+            (b"events", int_types[1], events.bytes()),
+            (b"revenue_cents", int_types[2], revenue.bytes()),
+            (b"top_category", 6, &top_body),
+        ];
+        for (name, ptype, body) in pages {
+            let header = data_page_header(n as i32, body.len());
+            file.write_all(&header)?;
+            file.write_all(body)?;
+            let size = (header.len() + body.len()) as i64;
+            let mut c = Vec::new();
+            write_col_chunk(&mut c, ptype, name, n as i64, size, offset);
+            chunks.push(c);
+            offset += size;
+        }
     }
-
-    let total_byte_size = (buf.len() - 4) as i64;
 
     let mut fmd = Vec::new();
     let mut fp = 0i16;
-    write_i32(&mut fmd, &mut fp, 1, 1); // version = 1
-    write_list_hdr(&mut fmd, &mut fp, 2, 12, 7); // schema: 7 elements
+    write_i32(&mut fmd, &mut fp, 1, 1);
+    write_list_hdr(&mut fmd, &mut fp, 2, 12, 7);
     write_schema_elem(&mut fmd, b"schema", None, None, None, None, Some(6));
-    write_schema_elem(
-        &mut fmd,
-        b"user_id",
-        Some(6),
-        Some(0),
-        Some(0),
-        Some(1),
-        None,
-    );
+    write_schema_elem(&mut fmd, b"user_id", Some(6), Some(0), Some(0), Some(1), None);
     write_schema_elem(&mut fmd, b"day", Some(1), Some(0), Some(6), Some(6), None);
-    write_schema_elem(&mut fmd, b"sessions", Some(2), Some(0), None, None, None);
-    write_schema_elem(&mut fmd, b"events", Some(2), Some(0), None, None, None);
-    write_schema_elem(
-        &mut fmd,
-        b"revenue_cents",
-        Some(2),
-        Some(0),
-        None,
-        None,
-        None,
-    );
-    write_schema_elem(
-        &mut fmd,
-        b"top_category",
-        Some(6),
-        Some(1),
-        Some(0),
-        Some(1),
-        None,
-    );
+    write_schema_elem(&mut fmd, b"sessions", Some(int_types[0]), Some(0), None, None, None);
+    write_schema_elem(&mut fmd, b"events", Some(int_types[1]), Some(0), None, None, None);
+    write_schema_elem(&mut fmd, b"revenue_cents", Some(int_types[2]), Some(0), None, None, None);
+    write_schema_elem(&mut fmd, b"top_category", Some(6), Some(1), Some(0), Some(1), None);
     write_i64(&mut fmd, &mut fp, 3, n as i64);
     if n > 0 {
-        write_list_hdr(&mut fmd, &mut fp, 4, 12, 1); // 1 RowGroup
+        write_list_hdr(&mut fmd, &mut fp, 4, 12, 1);
         let mut rp = 0i16;
         write_list_hdr(&mut fmd, &mut rp, 1, 12, 6);
         for c in &chunks {
             fmd.extend_from_slice(c);
         }
-        write_i64(&mut fmd, &mut rp, 2, total_byte_size);
+        write_i64(&mut fmd, &mut rp, 2, offset - 4);
         write_i64(&mut fmd, &mut rp, 3, n as i64);
-        fmd.push(0); // end RowGroup
+        fmd.push(0);
     } else {
-        write_list_hdr(&mut fmd, &mut fp, 4, 12, 0); // 0 RowGroups
+        write_list_hdr(&mut fmd, &mut fp, 4, 12, 0);
     }
-    fmd.push(0); // end FileMetaData
-
+    fmd.push(0);
     let fmd_len = fmd.len() as u32;
-    buf.extend_from_slice(&fmd);
-    buf.extend_from_slice(&fmd_len.to_le_bytes());
-    buf.extend_from_slice(b"PAR1");
-
-    let mut file = BufWriter::with_capacity(1 << 20, File::create(path)?);
-    file.write_all(&buf)?;
-    file.flush()
+    fmd.extend_from_slice(&fmd_len.to_le_bytes());
+    fmd.extend_from_slice(b"PAR1");
+    file.write_all(&fmd)
 }
 
 pub fn write_campaign_daily_file(path: &Path, rows: &[CampaignDailyRow<'_>]) -> io::Result<()> {

@@ -75,6 +75,58 @@ pub fn try_pack(bytes: &[u8]) -> Option<PackedId> {
     Some(PackedId(acc))
 }
 
+/// `try_pack` for a field inside a scan buffer: the caller guarantees that 16
+/// bytes are readable from `bytes.as_ptr()` (the scan buffers keep 192 zero
+/// bytes after their last line). Same result as `try_pack` for every input.
+#[inline(always)]
+pub fn try_pack_padded(bytes: &[u8]) -> Option<PackedId> {
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3", not(feature = "scalar")))]
+    {
+        use std::arch::x86_64::*;
+        let len = bytes.len();
+        if len == 0 || len > 10 {
+            return None;
+        }
+        // SAFETY: the caller guarantees 16 readable bytes.
+        unsafe {
+            let raw = _mm_loadu_si128(bytes.as_ptr() as *const __m128i);
+            let iota = _mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+            let keep = _mm_cmpgt_epi8(_mm_set1_epi8(len as i8), iota);
+            let x = _mm_and_si128(raw, keep);
+            let ge = |v: i8| _mm_cmpgt_epi8(x, _mm_set1_epi8(v - 1));
+            let le = |v: i8| _mm_cmpgt_epi8(_mm_set1_epi8(v + 1), x);
+            let dig = _mm_and_si128(ge(b'0' as i8), le(b'9' as i8));
+            let up = _mm_and_si128(ge(b'A' as i8), le(b'Z' as i8));
+            let low = _mm_and_si128(ge(b'a' as i8), le(b'z' as i8));
+            let us = _mm_cmpeq_epi8(x, _mm_set1_epi8(b'_' as i8));
+            let any = _mm_or_si128(_mm_or_si128(dig, up), _mm_or_si128(low, us));
+            let need = (1u32 << len) - 1;
+            if (_mm_movemask_epi8(any) as u32) & need != need {
+                return None;
+            }
+            let code = _mm_or_si128(
+                _mm_or_si128(
+                    _mm_and_si128(dig, _mm_sub_epi8(x, _mm_set1_epi8(47))),
+                    _mm_and_si128(up, _mm_sub_epi8(x, _mm_set1_epi8(54))),
+                ),
+                _mm_or_si128(
+                    _mm_and_si128(low, _mm_sub_epi8(x, _mm_set1_epi8(59))),
+                    _mm_and_si128(us, _mm_set1_epi8(37)),
+                ),
+            );
+            // Pairs -> 12 bits, quads -> 24 bits, first character most significant.
+            let pairs = _mm_maddubs_epi16(code, _mm_set1_epi16(0x0140));
+            let quads = _mm_madd_epi16(pairs, _mm_set1_epi32(0x0001_1000));
+            let q0 = _mm_cvtsi128_si32(quads) as u32 as u64;
+            let q1 = _mm_extract_epi32::<1>(quads) as u32 as u64;
+            let q2 = _mm_extract_epi32::<2>(quads) as u32 as u64;
+            return Some(PackedId((q0 << 36) | (q1 << 12) | (q2 >> 12)));
+        }
+    }
+    #[allow(unreachable_code)]
+    try_pack(bytes)
+}
+
 /// Unpack a packed ID (where `is_packed()` is true) into a 10-byte stack buffer, returning the valid slice.
 #[inline(always)]
 pub fn unpack(id: PackedId, buf: &mut [u8; 10]) -> &[u8] {
@@ -218,6 +270,16 @@ impl FallbackArena {
         }
     }
 
+    /// `pack_or_push` for a field inside a scan buffer (see `try_pack_padded`).
+    #[inline(always)]
+    pub fn pack_or_push_padded(&mut self, slice: &[u8]) -> PackedId {
+        if let Some(id) = try_pack_padded(slice) {
+            id
+        } else {
+            self.push_fallback(slice)
+        }
+    }
+
     #[inline(always)]
     pub fn push_fallback(&mut self, slice: &[u8]) -> PackedId {
         let offset = self.bytes.len();
@@ -242,6 +304,23 @@ impl FallbackArena {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn padded_pack_matches_scalar() {
+        let alphabet = b"09AZ_az/:@[`{\x7f\x80\xff ";
+        let mut rng = 88172645463325252u64;
+        for _ in 0..200000 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let len = (rng % 13) as usize;
+            let mut buf = [0u8; 32];
+            for (i, b) in buf.iter_mut().enumerate() {
+                let r = rng.rotate_left(i as u32 * 5);
+                *b = if r % 3 == 0 { alphabet[(r >> 8) as usize % alphabet.len()] } else { b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"[(r >> 8) as usize % 63] };
+            }
+            assert_eq!(try_pack_padded(&buf[..len]), try_pack(&buf[..len]), "{:?}", &buf[..len]);
+        }
+    }
     #[test]
     fn exact_equality_order_and_roundtrip_across_arenas() {
         let values: &[&[u8]] = &[

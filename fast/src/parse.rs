@@ -373,6 +373,138 @@ pub fn parse_calendar_part(text: &[u8]) -> Option<i64> {
     Some(((days * 24 + hour) * 60 + minute) * MS_PER_MINUTE + second * MS_PER_SECOND)
 }
 
+/// Validated `YYYY-MM-DD` dates seen by one scanning thread, direct-mapped by
+/// day of month (any window of up to 31 days fits without conflicts).
+pub struct DateCache {
+    key: [u64; 32],
+    key2: [u16; 32],
+    days: [i64; 32],
+}
+
+impl Default for DateCache {
+    fn default() -> Self {
+        // Key 0 never matches: a real date's first 8 bytes are digits and dashes.
+        Self { key: [0; 32], key2: [0; 32], days: [0; 32] }
+    }
+}
+
+/// `parse_calendar_part` with a cache of validated dates.
+#[inline(always)]
+pub fn parse_calendar_cached(text: &[u8], cache: &mut DateCache) -> Option<i64> {
+    if text.len() != 19 || text[10] != b'T' || text[13] != b':' || text[16] != b':' {
+        return None;
+    }
+    let key = u64::from_le_bytes(text[0..8].try_into().unwrap());
+    let key2 = u16::from_le_bytes([text[8], text[9]]);
+    let slot = (text[8].wrapping_mul(10).wrapping_add(text[9]) & 31) as usize;
+    let days = if cache.key[slot] == key && cache.key2[slot] == key2 {
+        cache.days[slot]
+    } else {
+        if text[4] != b'-' || text[7] != b'-' {
+            return None;
+        }
+        let year = parse_4digits(&text[0..4])?;
+        let month = parse_2digits(text[5], text[6])?;
+        let day = parse_2digits(text[8], text[9])?;
+        if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
+            return None;
+        }
+        let days = days_from_civil(year, month, day);
+        cache.key[slot] = key;
+        cache.key2[slot] = key2;
+        cache.days[slot] = days;
+        days
+    };
+    let hour = parse_2digits(text[11], text[12])?;
+    let minute = parse_2digits(text[14], text[15])?;
+    let second = parse_2digits(text[17], text[18])?;
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    Some(((days * 24 + hour) * 60 + minute) * MS_PER_MINUTE + second * MS_PER_SECOND)
+}
+
+/// `parse_f1` with a date cache.
+#[inline(always)]
+pub fn parse_f1_cached(text: &[u8], cache: &mut DateCache) -> Option<i64> {
+    if text.len() != 20 || text[19] != b'Z' {
+        return None;
+    }
+    parse_calendar_cached(&text[..19], cache)
+}
+
+/// F3 for a scan-buffer field (16 readable bytes from `text.as_ptr()`): up to
+/// 16 digits in SIMD, anything longer by `parse_f3`. Same result as `parse_f3`.
+#[inline(always)]
+pub fn parse_f3_padded(text: &[u8]) -> Option<i64> {
+    #[cfg(all(target_arch = "x86_64", target_feature = "ssse3", target_feature = "sse4.1", not(feature = "scalar")))]
+    {
+        use std::arch::x86_64::*;
+        let n = text.len();
+        if (1..=16).contains(&n) {
+            const fn ctrl(n: usize) -> [i8; 16] {
+                let mut c = [-1i8; 16];
+                let mut j = 16 - n;
+                while j < 16 {
+                    c[j] = (j - (16 - n)) as i8;
+                    j += 1;
+                }
+                c
+            }
+            const CTRL: [[i8; 16]; 17] = [
+                ctrl(0), ctrl(1), ctrl(2), ctrl(3), ctrl(4), ctrl(5), ctrl(6), ctrl(7), ctrl(8),
+                ctrl(9), ctrl(10), ctrl(11), ctrl(12), ctrl(13), ctrl(14), ctrl(15), ctrl(16),
+            ];
+            // SAFETY: the caller guarantees 16 readable bytes.
+            unsafe {
+                let x = _mm_loadu_si128(text.as_ptr() as *const __m128i);
+                let c = _mm_loadu_si128(CTRL[n].as_ptr() as *const __m128i);
+                let v = _mm_shuffle_epi8(x, c);
+                let used = _mm_cmpgt_epi8(c, _mm_set1_epi8(-1));
+                let d = _mm_sub_epi8(v, _mm_set1_epi8(b'0' as i8));
+                // A digit is 0..=9 after subtracting '0' (unsigned compare via min).
+                let is_digit = _mm_cmpeq_epi8(_mm_min_epu8(d, _mm_set1_epi8(9)), d);
+                if _mm_movemask_epi8(_mm_andnot_si128(is_digit, used)) != 0 {
+                    return None;
+                }
+                let d = _mm_and_si128(d, used);
+                let pairs = _mm_maddubs_epi16(d, _mm_set1_epi16(0x010A)); // d0*10 + d1
+                let quads = _mm_madd_epi16(pairs, _mm_set1_epi32(0x0001_0064)); // p0*100 + p1
+                let packed = _mm_packus_epi32(quads, quads);
+                let octs = _mm_madd_epi16(packed, _mm_set1_epi32(0x0001_2710)); // q0*10000 + q1
+                let hi = _mm_cvtsi128_si32(octs) as u32 as i64;
+                let lo = _mm_extract_epi32::<1>(octs) as u32 as i64;
+                return Some(hi * 100_000_000 + lo);
+            }
+        }
+    }
+    #[allow(unreachable_code)]
+    parse_f3(text)
+}
+
+/// `parse_ts` with a date cache, for a scan-buffer field (16 readable bytes
+/// from `text.as_ptr()`).
+#[inline(always)]
+pub fn parse_ts_cached(text: &[u8], cache: &mut DateCache) -> Option<i64> {
+    match text.len() {
+        20 if text[19] == b'Z' => parse_calendar_cached(&text[..19], cache),
+        25 if (text[19] == b'+' || text[19] == b'-') => {
+            if text[22] != b':' {
+                return None;
+            }
+            let local = parse_calendar_cached(&text[..19], cache)?;
+            let off_h = parse_2digits(text[20], text[21])?;
+            let off_m = parse_2digits(text[23], text[24])?;
+            if off_h > 23 || off_m > 59 {
+                return None;
+            }
+            let offset_ms = (off_h * 60 + off_m) * MS_PER_MINUTE;
+            Some(if text[19] == b'+' { local - offset_ms } else { local + offset_ms })
+        }
+        _ => parse_f3_padded(text),
+    }
+}
+
 #[inline(always)]
 pub fn parse_f1(text: &[u8]) -> Option<i64> {
     if text.len() != 20 || text[19] != b'Z' {
@@ -550,6 +682,58 @@ mod tests {
                     parse_csv_line::<4>(&line),
                     parse_csv_line_scalar::<4>(&line)
                 );
+            }
+        }
+    }
+    #[test]
+    fn padded_f3_matches_scalar() {
+        let mut rng = 0xD1B54A32D192ED03u64;
+        let alphabet = b"0123456789/:.-+e ";
+        for _ in 0..300000 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let len = (rng % 22) as usize;
+            let mut buf = [b'5'; 48];
+            for (i, b) in buf.iter_mut().enumerate().take(len) {
+                let r = rng.rotate_left(i as u32 * 3) >> 4;
+                *b = if r % 11 == 0 { alphabet[(r >> 4) as usize % alphabet.len()] } else { b'0' + (r % 10) as u8 };
+            }
+            assert_eq!(parse_f3_padded(&buf[..len]), parse_f3(&buf[..len]), "{:?}", &buf[..len]);
+        }
+        let mut buf = *b"9999999999999999xxxxxxxxxxxxxxxx";
+        assert_eq!(parse_f3_padded(&buf[..16]), Some(9_999_999_999_999_999));
+        buf[0] = b'0';
+        assert_eq!(parse_f3_padded(&buf[..1]), Some(0));
+    }
+    #[test]
+    fn cached_timestamps_match_uncached() {
+        let mut cache = DateCache::default();
+        let mut rng = 0x9E3779B97F4A7C15u64;
+        let pieces: [&[u8]; 12] = [b"2026", b"2028", b"0000", b"-02-", b"-13-", b"-12-", b"29", b"30", b"31", b"T23:59:59", b"T24:00:00", b"T00:00:60"];
+        for _ in 0..200000 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let mut t = Vec::new();
+            t.extend_from_slice(pieces[(rng % 3) as usize]);
+            t.extend_from_slice(pieces[3 + ((rng >> 8) % 3) as usize]);
+            t.extend_from_slice(pieces[6 + ((rng >> 16) % 3) as usize]);
+            t.extend_from_slice(pieces[9 + ((rng >> 24) % 3) as usize]);
+            match (rng >> 32) % 4 {
+                0 => t.push(b'Z'),
+                1 => t.extend_from_slice(b"+05:30"),
+                2 => t.extend_from_slice(b"-23:59"),
+                _ => t.extend_from_slice(b"+24:00"),
+            }
+            if (rng >> 40) % 9 == 0 {
+                t = (rng % 100000000000000).to_string().into_bytes();
+            }
+            let mut padded = t.clone();
+            padded.resize(t.len() + 16, b'7');
+            assert_eq!(parse_ts_cached(&padded[..t.len()], &mut cache), parse_ts(&t), "{:?}", String::from_utf8_lossy(&t));
+            if t.len() == 20 {
+                assert_eq!(parse_f1_cached(&t, &mut cache), parse_f1(&t));
             }
         }
     }
