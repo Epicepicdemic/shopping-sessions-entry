@@ -14,9 +14,9 @@ COPY fast/src/ /build/src/
 RUN cargo test --release
 RUN RUSTFLAGS="-C target-feature=+crt-static" \
         cargo build --release --target x86_64-unknown-linux-gnu --target-dir /build/t-portable \
- && RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=x86-64-v3" \
+ && RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq -C llvm-args=-inline-threshold=10000" \
         cargo build --release --target x86_64-unknown-linux-gnu --target-dir /build/t-v3 \
- && RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=x86-64-v4" \
+ && RUSTFLAGS="-C target-feature=+crt-static -C target-cpu=x86-64-v4 -C target-feature=+pclmulqdq -C llvm-args=-inline-threshold=10000" \
         cargo build --release --target x86_64-unknown-linux-gnu --target-dir /build/t-v4 \
  && mkdir -p /out \
  && cp /build/t-portable/x86_64-unknown-linux-gnu/release/shopping-fast /out/shopping-fast \

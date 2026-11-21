@@ -3,7 +3,7 @@
 use crate::parse::SESSION_GAP_MS;
 pub type Event = (i64, u32, u32);
 
-pub fn order(events: &mut Vec<Event>, bins: bool, window_start: i64, window_end: i64) {
+pub fn order(events: &mut [Event], bins: bool, window_start: i64, window_end: i64) {
     let nbin = window_end.saturating_sub(window_start) / SESSION_GAP_MS + 1;
     if !bins || events.len() < 64 || !(1..=2048).contains(&nbin) {
         events.sort_unstable_by_key(|e| e.0);
@@ -36,7 +36,7 @@ pub fn order(events: &mut Vec<Event>, bins: bool, window_start: i64, window_end:
         counts[b] = 0;
         cursors[b] += 1;
     }
-    *events = ordered;
+    events.copy_from_slice(&ordered);
 }
 
 #[cfg(test)]

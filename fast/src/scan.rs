@@ -213,6 +213,51 @@ impl Reader {
     }
 }
 
+/// A well-formed line and the position of the delimiter after each field.
+/// Fields are cut on demand: once the line passed the quote rules, a field is
+/// quoted exactly when its first byte is a quote, so no flags are stored.
+#[derive(Clone, Copy)]
+pub struct Rec<'a, const N: usize> {
+    line: &'a [u8],
+    ends: [usize; N],
+}
+
+impl<'a, const N: usize> Rec<'a, N> {
+    /// Field `i`, without its quotes.
+    #[inline(always)]
+    pub fn get(&self, i: usize) -> &'a [u8] {
+        let s = if i == 0 { 0 } else { self.ends[i - 1] + 1 };
+        let e = self.ends[i];
+        // SAFETY: a line is always followed by a readable byte (its newline or
+        // the scan buffer's zero slack), so byte `s <= len` is readable; a field
+        // opening with a quote was checked to close with one, so e - s >= 2.
+        unsafe {
+            let q = (*self.line.as_ptr().add(s) == b'"') as usize;
+            self.line.get_unchecked(s + q..e - q)
+        }
+    }
+
+    #[inline(always)]
+    pub fn fields(&self) -> [&'a [u8]; N] {
+        std::array::from_fn(|i| self.get(i))
+    }
+
+    /// From fields that `parse_csv_line` cut out of `line`.
+    #[inline]
+    fn from_fields(line: &'a [u8], fields: [&'a [u8]; N]) -> Self {
+        let base = line.as_ptr() as usize;
+        let mut ends = [0usize; N];
+        let mut raw = 0usize;
+        for i in 0..N {
+            let o = fields[i].as_ptr() as usize - base;
+            let quoted = (o != raw) as usize;
+            ends[i] = o + fields[i].len() + quoted;
+            raw = ends[i] + 1;
+        }
+        Self { line, ends }
+    }
+}
+
 /// Call `f` with the fields of every well-formed line in `bytes[first..stop]`
 /// (malformed lines are skipped, exactly as `parse_csv_line` decides).
 /// `bytes` must extend `SLACK` zero bytes past `stop`.
@@ -221,7 +266,7 @@ pub fn for_each_record<'a, const N: usize>(
     bytes: &'a [u8],
     first: usize,
     stop: usize,
-    mut f: impl FnMut([&'a [u8]; N]),
+    mut f: impl FnMut(&Rec<'a, N>),
 ) {
     debug_assert!(bytes.len() >= stop + SLACK);
     let mut pos = first;
@@ -247,9 +292,42 @@ pub fn for_each_record<'a, const N: usize>(
             None => (rest, stop),
         };
         if let Some(fields) = parse_csv_line::<N>(line) {
-            f(fields);
+            f(&Rec::from_fields(line, fields));
         }
         pos = next;
+    }
+}
+
+/// Prefix XOR of a 128-bit mask given as halves: bit i is the XOR of bits
+/// 0..=i. With PCLMULQDQ, one carry-less multiply by all-ones per half.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2", not(feature = "scalar")))]
+#[inline(always)]
+fn prefix_xor(lo: u64, hi: u64) -> u128 {
+    #[cfg(target_feature = "pclmulqdq")]
+    {
+        use std::arch::x86_64::*;
+        // SAFETY: pclmulqdq is enabled for this build.
+        unsafe {
+            let ones = _mm_set1_epi64x(-1);
+            let a = _mm_clmulepi64_si128::<0x00>(_mm_set_epi64x(0, lo as i64), ones);
+            let b = _mm_clmulepi64_si128::<0x00>(_mm_set_epi64x(0, hi as i64), ones);
+            let plo = _mm_cvtsi128_si64(a) as u64;
+            // The high half continues from the parity of the low half.
+            let phi = (_mm_cvtsi128_si64(b) as u64) ^ (0u64.wrapping_sub((lo.count_ones() & 1) as u64));
+            return (plo as u128) | ((phi as u128) << 64);
+        }
+    }
+    #[allow(unreachable_code)]
+    {
+        let mut inside = (lo as u128) | ((hi as u128) << 64);
+        inside ^= inside << 1;
+        inside ^= inside << 2;
+        inside ^= inside << 4;
+        inside ^= inside << 8;
+        inside ^= inside << 16;
+        inside ^= inside << 32;
+        inside ^= inside << 64;
+        inside
     }
 }
 
@@ -263,7 +341,7 @@ pub fn for_each_record<'a, const N: usize>(
 unsafe fn split_call<'a, const N: usize>(
     bytes: &'a [u8],
     pos: usize,
-    f: &mut impl FnMut([&'a [u8]; N]),
+    f: &mut impl FnMut(&Rec<'a, N>),
 ) -> Option<usize> {
     use std::arch::x86_64::*;
     let p = unsafe { bytes.as_ptr().add(pos) };
@@ -329,49 +407,28 @@ unsafe fn split_call<'a, const N: usize>(
         let quotes = (q0 as u128) | ((q1 as u128) << 64);
         let starts = (commas << 1) | 1;
         let ends = (commas >> 1) | (1u128 << (len - 1));
-        let mut inside = quotes;
-        inside ^= inside << 1;
-        inside ^= inside << 2;
-        inside ^= inside << 4;
-        inside ^= inside << 8;
-        inside ^= inside << 16;
-        inside ^= inside << 32;
-        inside ^= inside << 64;
+        let inside = prefix_xor(q0, q1);
         let bad = (inside & commas) | (quotes & inside & !starts) | (quotes & !inside & !ends);
         if bad != 0 || (q0.count_ones() + q1.count_ones()) & 1 != 0 {
             return Some(len);
         }
     }
     let line = unsafe { std::slice::from_raw_parts(p, len) };
-    let mut ends = [len as u32; 8];
+    let mut ends = [len; N];
     let mut k = 0usize;
     let mut m = c0;
     while m != 0 {
-        ends[k] = m.trailing_zeros();
+        ends[k] = m.trailing_zeros() as usize;
         m &= m - 1;
         k += 1;
     }
     let mut m = c1;
     while m != 0 {
-        ends[k] = 64 + m.trailing_zeros();
+        ends[k] = 64 + m.trailing_zeros() as usize;
         m &= m - 1;
         k += 1;
     }
-    // The quote check accepted the line, so a field is quoted exactly when its
-    // first byte is a quote (an empty field's first byte is the delimiter).
-    let mut fields = [&line[..0]; N];
-    let mut start = 0usize;
-    for (i, field) in fields.iter_mut().enumerate() {
-        let end = if i + 1 < N { ends[i] as usize } else { len };
-        // SAFETY: start <= len < 128 with SLACK bytes after the line; start <=
-        // end <= len, and a quoted field has end - start >= 2.
-        unsafe {
-            let q = (*p.add(start) == b'"') as usize;
-            *field = line.get_unchecked(start + q..end - q);
-        }
-        start = end + 1;
-    }
-    f(fields);
+    f(&Rec { line, ends });
     Some(len)
 }
 
@@ -385,8 +442,8 @@ mod tests {
         let mut bytes = text.to_vec();
         bytes.resize(text.len() + SLACK, 0);
         let mut out = Vec::new();
-        for_each_record::<N>(&bytes, 0, text.len(), |f| {
-            out.push(f.iter().map(|x| x.to_vec()).collect())
+        for_each_record::<N>(&bytes, 0, text.len(), |r| {
+            out.push(r.fields().iter().map(|x| x.to_vec()).collect())
         });
         out
     }
@@ -405,6 +462,27 @@ mod tests {
         out
     }
 
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2", not(feature = "scalar")))]
+    #[test]
+    fn prefix_xor_matches_shifts() {
+        let mut rng = 0x1234_5678_9ABC_DEF1u64;
+        for _ in 0..200000 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let lo = rng & rng.rotate_left(17);
+            let hi = rng.rotate_left(29) & rng.rotate_left(41);
+            let mut want = (lo as u128) | ((hi as u128) << 64);
+            let mut acc = 0u128;
+            let mut out = 0u128;
+            for i in 0..128 {
+                acc ^= (want >> i) & 1;
+                out |= acc << i;
+            }
+            want = out;
+            assert_eq!(prefix_xor(lo, hi), want);
+        }
+    }
     #[test]
     fn splitter_matches_scalar_oracle() {
         let mut rng = 0x9E3779B97F4A7C15u64;
@@ -450,8 +528,8 @@ mod tests {
                 let (bytes, first, stop) = reader
                     .load(&inputs.files[f as usize], inputs.sizes[f as usize], s, e)
                     .unwrap();
-                for_each_record::<2>(bytes, first, stop, |x| {
-                    got.push(x.iter().map(|y| y.to_vec()).collect::<Vec<_>>())
+                for_each_record::<2>(bytes, first, stop, |r| {
+                    got.push(r.fields().iter().map(|y| y.to_vec()).collect::<Vec<_>>())
                 });
             }
             assert_eq!(got, expected, "chunk {chunk}");
@@ -466,8 +544,8 @@ mod tests {
                         e,
                     )
                     .unwrap();
-                for_each_record::<2>(bytes, first, stop, |x| {
-                    got.push(x.iter().map(|y| y.to_vec()).collect::<Vec<_>>())
+                for_each_record::<2>(bytes, first, stop, |r| {
+                    got.push(r.fields().iter().map(|y| y.to_vec()).collect::<Vec<_>>())
                 });
             }
             assert_eq!(got, expected, "mapped chunk {chunk}");

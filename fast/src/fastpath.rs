@@ -194,23 +194,26 @@ pub fn decode_pair_padded(e: &[u8], u: &[u8]) -> (Option<u64>, Option<u64>) {
             let x = _mm_set_epi64x(hi as i64, lo as i64);
             let c = _mm_set_epi64x(HI[du] as i64, LO[de] as i64);
             let v = _mm_shuffle_epi8(x, c);
-            let used = _mm_cmpgt_epi8(c, _mm_set1_epi8(-1));
-            let dig = _mm_and_si128(
-                _mm_cmpgt_epi8(v, _mm_set1_epi8(b'0' as i8 - 1)),
-                _mm_cmpgt_epi8(_mm_set1_epi8(b'9' as i8 + 1), v),
-            );
-            let low = _mm_and_si128(
-                _mm_cmpgt_epi8(v, _mm_set1_epi8(b'a' as i8 - 1)),
-                _mm_cmpgt_epi8(_mm_set1_epi8(b'z' as i8 + 1), v),
-            );
-            let bad = _mm_movemask_epi8(_mm_andnot_si128(_mm_or_si128(dig, low), used)) as u32;
-            let val = _mm_and_si128(
-                used,
-                _mm_or_si128(
-                    _mm_and_si128(dig, _mm_sub_epi8(v, _mm_set1_epi8(48))),
-                    _mm_and_si128(low, _mm_sub_epi8(v, _mm_set1_epi8(87))),
-                ),
-            );
+            let (bad, val) = {
+                let used = _mm_cmpgt_epi8(c, _mm_set1_epi8(-1));
+                let dig = _mm_and_si128(
+                    _mm_cmpgt_epi8(v, _mm_set1_epi8(b'0' as i8 - 1)),
+                    _mm_cmpgt_epi8(_mm_set1_epi8(b'9' as i8 + 1), v),
+                );
+                let low = _mm_and_si128(
+                    _mm_cmpgt_epi8(v, _mm_set1_epi8(b'a' as i8 - 1)),
+                    _mm_cmpgt_epi8(_mm_set1_epi8(b'z' as i8 + 1), v),
+                );
+                let bad = _mm_movemask_epi8(_mm_andnot_si128(_mm_or_si128(dig, low), used)) as u32;
+                let val = _mm_and_si128(
+                    used,
+                    _mm_or_si128(
+                        _mm_and_si128(dig, _mm_sub_epi8(v, _mm_set1_epi8(48))),
+                        _mm_and_si128(low, _mm_sub_epi8(v, _mm_set1_epi8(87))),
+                    ),
+                );
+                (bad, val)
+            };
             let pairs = _mm_maddubs_epi16(val, _mm_set1_epi16(0x0124));
             let quads = _mm_madd_epi16(pairs, _mm_set1_epi32(0x0001_0510));
             let q0 = _mm_cvtsi128_si32(quads) as u32 as u64;

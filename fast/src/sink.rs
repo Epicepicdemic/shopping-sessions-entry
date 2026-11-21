@@ -75,7 +75,7 @@ impl Sink {
     pub fn person(
         &mut self,
         name: &[u8],
-        evs: &mut Vec<(i64, u32, u32)>,
+        evs: &mut [(i64, u32, u32)],
         clicks: &mut [(i64, PackedId, u32)],
         click_arena: &[u8],
     ) {

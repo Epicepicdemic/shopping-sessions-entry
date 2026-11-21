@@ -46,20 +46,23 @@ unsafe extern "C" {
 }
 
 /// The image ships a portable build (the entry point), an x86-64-v3 build and
-/// an x86-64-v4 (AVX-512) build. The portable build re-executes the widest
+/// an x86-64-v4 (AVX-512) build, both of the latter also using PCLMULQDQ. The portable build re-executes the widest
 /// build whose every feature this CPU has, so an older scorer CPU still runs
-/// correct code. `SHOPPING_BUILD=portable|v3|v4` caps the choice (for tests).
+/// correct code. `SHOPPING_BUILD=portable|v3|v4` selects (v3 is the default).
 #[cfg(target_arch = "x86_64")]
 fn dispatch_cpu_build() {
     use std::os::unix::process::CommandExt;
     if cfg!(target_feature = "avx2") {
         return;
     }
+    // Default: the v3 build. On Sapphire Rapids the v4 (AVX-512) build retires
+    // 5% fewer instructions but takes about 2% more cycles over a full 20M run,
+    // so it is opt-in (`SHOPPING_BUILD=v4`).
     let cap = match env::var("SHOPPING_BUILD").ok().as_deref() {
         Some("portable") => 0,
-        Some("v3") => 3,
+        Some("v4") => 4,
         _ if env::var_os("SHOPPING_PORTABLE").is_some() => 0,
-        _ => 4,
+        _ => 3,
     };
     let v3 = is_x86_feature_detected!("avx")
         && is_x86_feature_detected!("avx2")
@@ -71,7 +74,8 @@ fn dispatch_cpu_build() {
         && is_x86_feature_detected!("movbe")
         && is_x86_feature_detected!("popcnt")
         && is_x86_feature_detected!("sse4.2")
-        && is_x86_feature_detected!("xsave");
+        && is_x86_feature_detected!("xsave")
+        && is_x86_feature_detected!("pclmulqdq");
     let v4 = v3
         && is_x86_feature_detected!("avx512f")
         && is_x86_feature_detected!("avx512bw")
@@ -466,7 +470,8 @@ fn build_links(data_dir: &Path, ncpu: usize) -> io::Result<LinkPart> {
                             )
                             .expect("read links")
                     };
-                    scan::for_each_record::<2>(bytes, first, stop, |[id_a, id_b]| {
+                    scan::for_each_record::<2>(bytes, first, stop, |rec| {
+                        let [id_a, id_b] = rec.fields();
                         if !id_a.is_empty() && !id_b.is_empty() {
                             let pa = arena.pack_or_push_padded(id_a);
                             let pb = arena.pack_or_push_padded(id_b);
@@ -621,7 +626,8 @@ fn prepare_fast(catalog: &Catalog, inputs: &scan::Inputs, ncpu: usize) -> Option
             return None;
         };
         bytes_seen += (stop - first) as u64;
-        scan::for_each_record::<7>(bytes, first, stop, |fields| {
+        scan::for_each_record::<7>(bytes, first, stop, |rec| {
+            let fields = rec.fields();
             lines += 1;
             let e = fastpath::unmixed(fields[0], b'e');
             let u = fastpath::unmixed(fields[1], b'u');
@@ -825,7 +831,8 @@ fn run_pipeline(
                             )
                             .expect("read events")
                     };
-                    scan::for_each_record::<7>(bytes, first, stop, |fields| {
+                    scan::for_each_record::<7>(bytes, first, stop, |rec| {
+                        let fields = rec.fields();
                         let [
                             event_id,
                             user_id,
@@ -1240,8 +1247,8 @@ fn run_pipeline(
                             )
                             .expect("read clicks")
                     };
-                    scan::for_each_record::<4>(bytes, first, stop, |fields| {
-                        let [click_id, user_id, campaign_id, ts_text] = fields;
+                    scan::for_each_record::<4>(bytes, first, stop, |rec| {
+                        let [click_id, user_id, campaign_id, ts_text] = rec.fields();
                         if click_id.is_empty() || user_id.is_empty() || campaign_id.is_empty() {
                             return;
                         }
@@ -1432,11 +1439,13 @@ fn run_pipeline(
                     let mut idbuf: Vec<u8> = Vec::new();
                     let mut fast_evs: Vec<(u32, i64, u32, u32)> = Vec::new();
                     let mut fast_cls: Vec<(u32, i64, u64, u32)> = Vec::new();
-                    let mut sorted_evs: Vec<(u32, i64, u32, u32)> = Vec::new();
-                    let mut sorted_cls: Vec<(u32, i64, u64, u32)> = Vec::new();
+                    // Each person's events and clicks end up contiguous in these
+                    // arrays and go to the sink as slices, without per-person copies.
+                    let mut sp: Vec<u32> = Vec::new();
+                    let mut se: Vec<(i64, u32, u32)> = Vec::new();
+                    let mut scp: Vec<u32> = Vec::new();
+                    let mut sc: Vec<(i64, PackedId, u32)> = Vec::new();
                     let mut counts: Vec<u32> = Vec::new();
-                    let mut evs: Vec<(i64, u32, u32)> = Vec::new();
-                    let mut cls: Vec<(i64, PackedId, u32)> = Vec::new();
                     let mut served = 0usize;
 
                     let mut exact_event = |user: &[u8], ts: i64, price: u32, cat: u32, scratch: &mut FallbackArena| {
@@ -1513,45 +1522,48 @@ fn run_pipeline(
                             for i in 1..=span {
                                 counts[i] += counts[i - 1];
                             }
-                            sorted_evs.clear();
-                            sorted_evs.resize(fast_evs.len(), (0, 0, 0, 0));
+                            sp.clear();
+                            sp.resize(fast_evs.len(), 0);
+                            se.clear();
+                            se.resize(fast_evs.len(), (0, 0, 0));
                             for e in &fast_evs {
                                 let k = e.0 as usize - lo;
-                                sorted_evs[counts[k] as usize] = *e;
+                                let at = counts[k] as usize;
+                                sp[at] = e.0;
+                                se[at] = (e.1, e.2, e.3);
                                 counts[k] += 1;
                             }
                         } else {
-                            sorted_evs.clear();
-                            sorted_evs.extend_from_slice(&fast_evs);
-                            sorted_evs.sort_unstable_by_key(|e| e.0);
+                            fast_evs.sort_unstable_by_key(|e| e.0);
+                            sp.clear();
+                            se.clear();
+                            sp.extend(fast_evs.iter().map(|e| e.0));
+                            se.extend(fast_evs.iter().map(|e| (e.1, e.2, e.3)));
                         }
-                        sorted_cls.clear();
-                        sorted_cls.extend_from_slice(&fast_cls);
-                        sorted_cls.sort_unstable_by_key(|c| c.0);
+                        fast_cls.sort_unstable_by_key(|c| c.0);
+                        scp.clear();
+                        sc.clear();
+                        scp.extend(fast_cls.iter().map(|c| c.0));
+                        sc.extend(fast_cls.iter().map(|c| (c.1, PackedId(c.2), c.3)));
                         let mut ci = 0usize;
                         let mut i = 0usize;
-                        while i < sorted_evs.len() {
-                            let p = sorted_evs[i].0;
-                            let mut j = i;
-                            evs.clear();
-                            while j < sorted_evs.len() && sorted_evs[j].0 == p {
-                                let e = sorted_evs[j];
-                                evs.push((e.1, e.2, e.3));
+                        while i < sp.len() {
+                            let p = sp[i];
+                            let mut j = i + 1;
+                            while j < sp.len() && sp[j] == p {
                                 j += 1;
                             }
                             // Clicks of people with no fast event here cannot be claimed
                             // by this bucket; route any such click exactly anyway.
-                            while ci < sorted_cls.len() && sorted_cls[ci].0 < p {
-                                let (cp, ts, cid, camp) = sorted_cls[ci];
-                                keys.user_id((cp as u64) << 9, &mut idbuf);
-                                exact_click(&idbuf, (ts, cid, camp), &mut scratch);
+                            while ci < scp.len() && scp[ci] < p {
+                                let (ts, cid, camp) = sc[ci];
+                                keys.user_id((scp[ci] as u64) << 9, &mut idbuf);
+                                exact_click(&idbuf, (ts, cid.0, camp), &mut scratch);
                                 ci += 1;
                             }
-                            cls.clear();
-                            while ci < sorted_cls.len() && sorted_cls[ci].0 == p {
-                                let c = sorted_cls[ci];
-                                cls.push((c.1, PackedId(c.2), c.3));
-                                ci += 1;
+                            let mut cj = ci;
+                            while cj < scp.len() && scp[cj] == p {
+                                cj += 1;
                             }
                             let pu = p as usize;
                             if people.slots[pu].status.load(AtomicOrdering::Relaxed) == fastpath::LINKED {
@@ -1565,14 +1577,15 @@ fn run_pipeline(
                             } else {
                                 keys.user_id((p as u64) << 9, &mut idbuf);
                             }
-                            sink.person(&idbuf, &mut evs, &mut cls, &[]);
+                            sink.person(&idbuf, &mut se[i..j], &mut sc[ci..cj], &[]);
                             served += 1;
                             i = j;
+                            ci = cj;
                         }
-                        while ci < sorted_cls.len() {
-                            let (cp, ts, cid, camp) = sorted_cls[ci];
-                            keys.user_id((cp as u64) << 9, &mut idbuf);
-                            exact_click(&idbuf, (ts, cid, camp), &mut scratch);
+                        while ci < scp.len() {
+                            let (ts, cid, camp) = sc[ci];
+                            keys.user_id((scp[ci] as u64) << 9, &mut idbuf);
+                            exact_click(&idbuf, (ts, cid.0, camp), &mut scratch);
                             ci += 1;
                         }
                     }
