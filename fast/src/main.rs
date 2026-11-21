@@ -1,6 +1,7 @@
 //! High-performance Shopping Sessions pipeline (`fast`).
 //! Zero third-party dependencies. Implements every rule of `rules.md` with exact fallbacks.
 
+mod compact_links;
 mod fastpath;
 mod id;
 mod io_util;
@@ -302,6 +303,7 @@ struct Catalog {
     canonical_links: Vec<PackedId>, // index -> canonical PackedId in `link_arena`
     link_nodes: Vec<PackedId>,      // index -> the node's own ID in `link_arena`
     link_roots: Vec<u32>,           // index -> component root index
+    compact_links: bool,
 }
 
 fn read_manifest(data_dir: &Path) -> io::Result<(i64, i64)> {
@@ -417,6 +419,7 @@ fn build_catalog(data_dir: &Path) -> io::Result<Catalog> {
         canonical_links: Vec::new(),
         link_nodes: Vec::new(),
         link_roots: Vec::new(),
+        compact_links: false,
     })
 }
 
@@ -499,7 +502,10 @@ fn build_links(data_dir: &Path, ncpu: usize) -> io::Result<LinkPart> {
         }
     });
 
-    let partials = partial_pairs.into_inner().unwrap();
+    Ok(exact_link_components(partial_pairs.into_inner().unwrap()))
+}
+
+fn exact_link_components(partials: Vec<(FallbackArena, Vec<(PackedId, PackedId)>)>) -> LinkPart {
     let total_pairs: usize = partials.iter().map(|(_, p)| p.len()).sum();
     let mut link_arena = FallbackArena::new();
     let mut links = IdTable::with_capacity(total_pairs + 16);
@@ -554,13 +560,13 @@ fn build_links(data_dir: &Path, ncpu: usize) -> io::Result<LinkPart> {
         link_roots.push(r as u32);
     }
 
-    Ok(LinkPart {
+    LinkPart {
         link_arena,
         links,
         canonical_links,
         link_nodes: nodes,
         link_roots,
-    })
+    }
 }
 
 /// Raw parsed event record stored in a shard before dedup.
@@ -754,16 +760,41 @@ fn classify_people(catalog: &Catalog, keys: &Keys, people: &People, ncpu: usize)
     });
 }
 
+/// Exact resolution consults the sparse graph first. An omitted component is
+/// represented by a proven alias mask even if event/click routing later
+/// marked that slot complex.
+fn person_key<'a>(
+    catalog: &'a Catalog,
+    fast: Option<&(Keys, People)>,
+    id: PackedId,
+    arena: &'a [u8],
+) -> (PackedId, &'a [u8]) {
+    if let Some(index) = catalog.links.get(id, arena, &catalog.link_arena.bytes) {
+        return (catalog.canonical_links[index as usize], &catalog.link_arena.bytes);
+    }
+    if catalog.compact_links {
+        let (keys, people) = fast.expect("compact link graph needs decoded slots");
+        let mut buf = [0u8; 10];
+        if let Some(u) = keys.user_counter_unpadded(id.as_bytes(arena, &mut buf)) {
+            let alias = (u & 511) as u32;
+            let p = (u >> 9) as usize;
+            if alias < 32 && people.slots[p].mask.load(AtomicOrdering::Relaxed) & (1 << alias) != 0 {
+                return (PackedId(people.name[p].load(AtomicOrdering::Relaxed)), &[]);
+            }
+        }
+    }
+    (id, arena)
+}
+
 /// Resolve an exact user ID to its person (link component name, or itself)
 /// inside `arena`.
-#[inline]
-fn resolve_person(catalog: &Catalog, user: &[u8], arena: &mut FallbackArena) -> PackedId {
+fn resolve_person(
+    catalog: &Catalog, fast: Option<&(Keys, People)>, user: &[u8], arena: &mut FallbackArena,
+) -> PackedId {
     let mut tmp = FallbackArena::new();
     let uid = tmp.pack_or_push(user);
-    match catalog.links.get(uid, &tmp.bytes, &catalog.link_arena.bytes) {
-        Some(ci) => arena.import(catalog.canonical_links[ci as usize], &catalog.link_arena.bytes),
-        None => arena.import(uid, &tmp.bytes),
-    }
+    let (id, source) = person_key(catalog, fast, uid, &tmp.bytes);
+    arena.import(id, source)
 }
 
 #[inline]
@@ -808,7 +839,13 @@ fn run_pipeline(
     let bucket_reserve = fast.as_ref().map_or(0, |(k, _)| {
         (k.est_lines as usize / n_buckets.max(1)) * 13 / 10 / event_workers.max(1) + 64
     });
-    let link_result: Mutex<Option<io::Result<LinkPart>>> = Mutex::new(None);
+    let link_result = Mutex::new(None);
+    // Compact link graph (ported from the team lead's prototype, which was based
+    // on 725522a): isolated, connected same-slot components become an alias mask
+    // and name; everything else stays in the exact graph. SHOPPING_COMPACT_LINKS=0
+    // restores the full exact graph plus classification.
+    let use_compact_links = env::var("SHOPPING_COMPACT_LINKS").ok().as_deref() != Some("0")
+        && fast_ref.is_some();
 
     thread::scope(|outer| {
     // Diagnostic: SHOPPING_SCAN_ONLY=1 measures the event scan alone (no link
@@ -816,7 +853,24 @@ fn run_pipeline(
     let scan_only = env::var("SHOPPING_SCAN_ONLY").ok().as_deref() == Some("1");
     if !scan_only {
         outer.spawn(|| {
-            *link_result.lock().unwrap() = Some(build_links(data_dir, ncpu));
+            let link_start = Instant::now();
+            let result = if use_compact_links {
+                let (keys, people) = fast_ref.unwrap();
+                compact_links::build(data_dir, ncpu, use_pread, keys, people)
+                    .map(|(links, metrics)| (links, Some(metrics)))
+            } else {
+                build_links(data_dir, ncpu).map(|links| (links, None))
+            };
+            if env::var_os("SHOPPING_TIMING").is_some() {
+                let link_ms = link_start.elapsed().as_secs_f64() * 1000.0;
+                if let Ok((_, Some(m))) = &result {
+                    eprintln!("link_ms={link_ms:.3} link_parse={:.3} link_components={:.3} link_sparse={:.3} local_slots={} external_edges={}",
+                              m.parse, m.components, m.sparse, m.local_slots, m.external_edges);
+                } else {
+                    eprintln!("link_ms={link_ms:.3}");
+                }
+            }
+            *link_result.lock().unwrap() = Some(result);
         });
     }
     thread::scope(|scope| {
@@ -1018,9 +1072,13 @@ fn run_pipeline(
         eprintln!("scan_only_ms={:.1}", (t_ev_scan - t_fast_prep).as_secs_f64() * 1000.0);
         unsafe { _exit(0) }
     }
-    catalog.install_links(link_result.into_inner().unwrap().expect("link builder ran")?);
-    if let Some((keys, people)) = fast_ref {
-        classify_people(&catalog, keys, people, ncpu);
+    let (links, _) = link_result.into_inner().unwrap().expect("link builder ran")?;
+    catalog.install_links(links);
+    catalog.compact_links = use_compact_links;
+    if !use_compact_links {
+        if let Some((keys, people)) = fast_ref {
+            classify_people(&catalog, keys, people, ncpu);
+        }
     }
     let t_links = t0.elapsed();
     let mut all_ev_shards = worker_ev_shards.into_inner().unwrap();
@@ -1110,17 +1168,8 @@ fn run_pipeline(
                         }
                         let win_arena = &batches[final_b].arena.bytes;
                         // Resolve user_id -> person_id
-                        let (person_id, person_arena) = match catalog.links.get(
-                            win_ev.user_id,
-                            win_arena,
-                            &catalog.link_arena.bytes,
-                        ) {
-                            Some(canon_idx) => (
-                                catalog.canonical_links[canon_idx as usize],
-                                &catalog.link_arena.bytes[..],
-                            ),
-                            None => (win_ev.user_id, win_arena.as_slice()),
-                        };
+                        let (person_id, person_arena) =
+                            person_key(&catalog, fast_ref, win_ev.user_id, win_arena);
                         let ph = person_id.hash64(person_arena);
                         let p_shard = (ph as usize) & (NUM_SHARDS - 1);
                         let out_batch = &mut out_shards[p_shard];
@@ -1310,17 +1359,8 @@ fn run_pipeline(
 
                         tmp_arena.bytes.clear();
                         let uid_pid = tmp_arena.pack_or_push_padded(user_id);
-                        let (person_id, person_arena) = match catalog.links.get(
-                            uid_pid,
-                            &tmp_arena.bytes,
-                            &catalog.link_arena.bytes,
-                        ) {
-                            Some(canon_idx) => (
-                                catalog.canonical_links[canon_idx as usize],
-                                &catalog.link_arena.bytes[..],
-                            ),
-                            None => (uid_pid, tmp_arena.bytes.as_slice()),
-                        };
+                        let (person_id, person_arena) =
+                            person_key(&catalog, fast_ref, uid_pid, &tmp_arena.bytes);
                         let ph = person_id.hash64(person_arena);
                         let p_shard = (ph as usize) & (NUM_SHARDS - 1);
                         let batch = &mut shards[p_shard];
@@ -1405,7 +1445,7 @@ fn run_pipeline(
                                 } else {
                                     keys.user_id(c.user, &mut idbuf);
                                     scratch.bytes.clear();
-                                    let pid = resolve_person(&catalog, &idbuf, &mut scratch);
+                                    let pid = resolve_person(&catalog, fast_ref, &idbuf, &mut scratch);
                                     let out = &mut cl_out[person_shard(pid, &scratch.bytes)];
                                     let pid = out.arena.import(pid, &scratch.bytes);
                                     out.clicks.push(PersonClick {
@@ -1477,14 +1517,14 @@ fn run_pipeline(
 
                     let mut exact_event = |user: &[u8], ts: i64, price: u32, cat: u32, scratch: &mut FallbackArena| {
                         scratch.bytes.clear();
-                        let pid = resolve_person(catalog, user, scratch);
+                        let pid = resolve_person(catalog, fast_ref, user, scratch);
                         let out = &mut ev_out[person_shard(pid, &scratch.bytes)];
                         let pid = out.arena.import(pid, &scratch.bytes);
                         out.events.push(PersonEvent { person_id: pid, ts, price, cat_id: cat });
                     };
                     let mut exact_click = |user: &[u8], c: (i64, u64, u32), scratch: &mut FallbackArena| {
                         scratch.bytes.clear();
-                        let pid = resolve_person(catalog, user, scratch);
+                        let pid = resolve_person(catalog, fast_ref, user, scratch);
                         let out = &mut cl_out[person_shard(pid, &scratch.bytes)];
                         let pid = out.arena.import(pid, &scratch.bytes);
                         out.clicks.push(PersonClick {

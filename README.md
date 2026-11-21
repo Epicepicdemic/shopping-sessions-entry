@@ -53,6 +53,7 @@ Switches, for measurement:
 |---|---|
 | `SHOPPING_TIMING=1` | Logs stage times, the build and bucket width chosen, and peak RSS to stderr. |
 | `SHOPPING_FAST=0` | Runs the exact solver only. |
+| `SHOPPING_COMPACT_LINKS=0` | Builds the full exact link graph instead of the compact one (fast path only). |
 | `SHOPPING_BUILD=portable` or `v4` | Forces a build. The default is v3 when the CPU has it. |
 | `SHOPPING_QB=13`..`16` | Forces the bucket width. The default comes from the CPU's L2 size. |
 | `SHOPPING_PREAD=1` | Reads input with `pread` instead of `mmap`. |
@@ -69,6 +70,7 @@ Switches, for measurement:
 - **Fast path.**
   - Verified rows are stored as 16-byte records in counter buckets. A row that does not fit 16 bytes, such as a purchase, keeps a 24-byte side record.
   - Each bucket deduplicates with a direct array and sessionises its people in the same pass.
+  - Links between aliases of one decoded person form a compact graph: if they make one connected component that no other link touches, the person gets an alias mask and the bytewise-smallest name directly. Every other link goes to the exact link graph, which is always consulted first.
   - People who fail a check go to the exact solver.
 - **Output.** Plain, uncompressed Parquet.
 
