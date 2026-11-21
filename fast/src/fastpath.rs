@@ -156,6 +156,78 @@ pub fn decode_padded(id: &[u8], prefix: u8) -> Option<u64> {
     decode(id, prefix)
 }
 
+/// `decode` of an `e` ID and a `u` ID in one vector pass (Argon's dual
+/// decode). Both slices must have 16 readable bytes from their start (scan
+/// buffer fields). Same results as two `decode` calls.
+#[inline(always)]
+pub fn decode_pair_padded(e: &[u8], u: &[u8]) -> (Option<u64>, Option<u64>) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "ssse3", target_feature = "sse4.1", not(feature = "scalar")))]
+    {
+        use std::arch::x86_64::*;
+        let shape = |id: &[u8], prefix: u8| {
+            let n = id.len();
+            (2..=9).contains(&n) && id[0] == prefix && (n == 2 || id[1] != b'0')
+        };
+        let (se, su) = (shape(e, b'e'), shape(u, b'u'));
+        if !se && !su {
+            return (None, None);
+        }
+        // Right-align `d` digits in an 8-lane half (most significant first).
+        const fn ctrl8(d: usize, base: u8) -> u64 {
+            let mut c = 0u64;
+            let mut j = 0;
+            while j < 8 {
+                let b = if j >= 8 - d { base + (j - (8 - d)) as u8 } else { 0x80 };
+                c |= (b as u64) << (8 * j);
+                j += 1;
+            }
+            c
+        }
+        const LO: [u64; 9] = [ctrl8(0, 0), ctrl8(1, 0), ctrl8(2, 0), ctrl8(3, 0), ctrl8(4, 0), ctrl8(5, 0), ctrl8(6, 0), ctrl8(7, 0), ctrl8(8, 0)];
+        const HI: [u64; 9] = [ctrl8(0, 8), ctrl8(1, 8), ctrl8(2, 8), ctrl8(3, 8), ctrl8(4, 8), ctrl8(5, 8), ctrl8(6, 8), ctrl8(7, 8), ctrl8(8, 8)];
+        let de = if se { e.len() - 1 } else { 0 };
+        let du = if su { u.len() - 1 } else { 0 };
+        // SAFETY: each slice has 16 readable bytes, so bytes 1..9 are readable.
+        unsafe {
+            let lo = std::ptr::read_unaligned(e.as_ptr().add(1) as *const u64);
+            let hi = std::ptr::read_unaligned(u.as_ptr().add(1) as *const u64);
+            let x = _mm_set_epi64x(hi as i64, lo as i64);
+            let c = _mm_set_epi64x(HI[du] as i64, LO[de] as i64);
+            let v = _mm_shuffle_epi8(x, c);
+            let used = _mm_cmpgt_epi8(c, _mm_set1_epi8(-1));
+            let dig = _mm_and_si128(
+                _mm_cmpgt_epi8(v, _mm_set1_epi8(b'0' as i8 - 1)),
+                _mm_cmpgt_epi8(_mm_set1_epi8(b'9' as i8 + 1), v),
+            );
+            let low = _mm_and_si128(
+                _mm_cmpgt_epi8(v, _mm_set1_epi8(b'a' as i8 - 1)),
+                _mm_cmpgt_epi8(_mm_set1_epi8(b'z' as i8 + 1), v),
+            );
+            let bad = _mm_movemask_epi8(_mm_andnot_si128(_mm_or_si128(dig, low), used)) as u32;
+            let val = _mm_and_si128(
+                used,
+                _mm_or_si128(
+                    _mm_and_si128(dig, _mm_sub_epi8(v, _mm_set1_epi8(48))),
+                    _mm_and_si128(low, _mm_sub_epi8(v, _mm_set1_epi8(87))),
+                ),
+            );
+            let pairs = _mm_maddubs_epi16(val, _mm_set1_epi16(0x0124));
+            let quads = _mm_madd_epi16(pairs, _mm_set1_epi32(0x0001_0510));
+            let q0 = _mm_cvtsi128_si32(quads) as u32 as u64;
+            let q1 = _mm_extract_epi32::<1>(quads) as u32 as u64;
+            let q2 = _mm_extract_epi32::<2>(quads) as u32 as u64;
+            let q3 = _mm_extract_epi32::<3>(quads) as u32 as u64;
+            let ve = q0 * 1_679_616 + q1;
+            let vu = q2 * 1_679_616 + q3;
+            let re = (se && bad & 0xFF == 0 && ve <= M40).then_some(ve);
+            let ru = (su && bad >> 8 == 0 && vu <= M40).then_some(vu);
+            return (re, ru);
+        }
+    }
+    #[allow(unreachable_code)]
+    (decode(e, b'e'), decode(u, b'u'))
+}
+
 /// The ID string the generator writes for `value` (already scrambled).
 pub fn encode(prefix: u8, value: u64, out: &mut Vec<u8>) {
     const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
@@ -188,20 +260,23 @@ pub struct Keys {
 }
 
 impl Keys {
-    /// The event counter of a canonical `e` ID below the bound. `id` must have
-    /// 16 readable bytes (a scan-buffer field).
-    #[inline(always)]
-    pub fn event_counter(&self, id: &[u8]) -> Option<u64> {
-        let v = counter_of(unmix(decode_padded(id, b'e')?), self.event_key);
-        (v < self.event_cap).then_some(v)
-    }
-
     /// The user counter (`person * 512 + alias`) of a canonical `u` ID whose
     /// person slot is below the bound. `id` must have 16 readable bytes.
     #[inline(always)]
     pub fn user_counter(&self, id: &[u8]) -> Option<u64> {
         let v = counter_of(unmix(decode_padded(id, b'u')?), self.user_key);
         ((v >> 9) < self.person_cap).then_some(v)
+    }
+
+    /// `event_counter` and `user_counter` together (both scan-buffer fields).
+    #[inline(always)]
+    pub fn pair_counters(&self, event_id: &[u8], user_id: &[u8]) -> (Option<u64>, Option<u64>) {
+        let (e, u) = decode_pair_padded(event_id, user_id);
+        let e = e.map(|v| counter_of(unmix(v), self.event_key)).filter(|&c| c < self.event_cap);
+        let u = u
+            .map(|v| counter_of(unmix(v), self.user_key))
+            .filter(|&c| (c >> 9) < self.person_cap);
+        (e, u)
     }
 
     /// `user_counter` for an ID anywhere (no padding guarantee).
@@ -314,17 +389,79 @@ pub fn unmixed(id: &[u8], prefix: u8) -> Option<u64> {
     decode(id, prefix).map(unmix)
 }
 
-/// One event row on the fast path, 32 bytes.
+/// One event row on the fast path, 24 bytes. The category (16 bits) is split
+/// over the spare top bytes of `key` and `user`.
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FastRec {
-    pub ingest: i64,
-    pub ts: i64,
-    /// User counter, or `INVALID`, or `OPAQUE | offset into the scanning thread's arena`.
+    /// Ingest seconds + 2^39 (bits 0..40; F1 ingest is whole seconds, years
+    /// 0000-9999), the counter modulo `Q` (bits 40..56), category high byte
+    /// (bits 56..64).
+    pub key: u64,
+    /// Bits 0..40: the user counter, or for `OPAQUE` an offset into the
+    /// scanning thread's arena; bits 40..48: that thread's index (`OPAQUE`);
+    /// bits 48..56: category low byte; bit 62 `OPAQUE`, bit 63 `INVALID`.
     pub user: u64,
-    pub price: u32,
-    pub cat: u16,
-    /// Counter modulo `Q`.
-    pub low: u16,
+    /// `ts - window_start` in ms (bits 0..40, valid rows only; windows up to
+    /// 34.8 years) and the price (bits 40..64, at most 10,000,000).
+    pub time_price: u64,
+}
+
+const _: () = assert!(std::mem::size_of::<FastRec>() == 24 && QB <= 16);
+
+/// Largest scanning-thread index an `OPAQUE` record can name.
+pub const MAX_WORKERS: usize = 256;
+
+impl FastRec {
+    /// `user` holds a counter (or `OPAQUE | wid << 40 | offset`) with bits
+    /// 48..56 clear; `cat` < 65,536; `ts_off` < 2^40.
+    #[inline(always)]
+    pub fn new(ingest_ms: i64, counter: u64, user: u64, ts_off: u64, price: u32, cat: u32) -> Self {
+        let sec = (ingest_ms.div_euclid(1000) + (1i64 << 39)) as u64 & M40;
+        Self {
+            key: sec | (((counter as usize & (Q - 1)) as u64) << 40) | (((cat >> 8) as u64) << 56),
+            user: user | (((cat & 0xFF) as u64) << 48),
+            time_price: (ts_off & M40) | ((price as u64) << 40),
+        }
+    }
+    #[inline(always)]
+    pub fn ingest(&self) -> u64 {
+        self.key & M40
+    }
+    #[inline(always)]
+    pub fn low(&self) -> usize {
+        (self.key >> 40) as usize & (Q - 1)
+    }
+    #[inline(always)]
+    pub fn is_invalid(&self) -> bool {
+        self.user & INVALID != 0
+    }
+    #[inline(always)]
+    pub fn is_opaque(&self) -> bool {
+        self.user & OPAQUE != 0
+    }
+    /// The user counter (`person * 512 + alias`) of a non-opaque record.
+    #[inline(always)]
+    pub fn counter(&self) -> u64 {
+        self.user & M40
+    }
+    /// Scanning thread and arena offset of an `OPAQUE` record's user bytes.
+    #[inline(always)]
+    pub fn opaque_ref(&self) -> (usize, usize) {
+        (((self.user >> 40) & 0xFF) as usize, (self.user & M40) as usize)
+    }
+    #[inline(always)]
+    pub fn cat(&self) -> u32 {
+        (((self.key >> 56) as u32) << 8) | ((self.user >> 48) & 0xFF) as u32
+    }
+    #[inline(always)]
+    pub fn ts_off(&self) -> i64 {
+        (self.time_price & M40) as i64
+    }
+    #[inline(always)]
+    pub fn price(&self) -> u32 {
+        (self.time_price >> 40) as u32
+    }
 }
 
 /// One click on the fast path.
@@ -413,6 +550,24 @@ mod tests {
                 *b = if r % 5 == 0 { alphabet[(r >> 5) as usize % alphabet.len()] } else { alphabet[(r >> 5) as usize % 36] };
             }
             assert_eq!(decode_padded(&buf[..len], b'e'), decode(&buf[..len], b'e'), "{:?}", &buf[..len]);
+        }
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..300_000 {
+            let mut bufs = [[0u8; 32]; 2];
+            let mut lens = [0usize; 2];
+            for (k, (buf, len)) in bufs.iter_mut().zip(lens.iter_mut()).enumerate() {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                *len = (rng % 12) as usize;
+                buf[0] = if rng % 9 == 0 { b'x' } else if k == 0 { b'e' } else { b'u' };
+                for (i, b) in buf.iter_mut().enumerate().skip(1) {
+                    let r = rng.rotate_left(i as u32 * 5) >> 3;
+                    *b = if r % 6 == 0 { alphabet[(r >> 5) as usize % alphabet.len()] } else { alphabet[(r >> 5) as usize % 36] };
+                }
+            }
+            let (e, u) = (&bufs[0][..lens[0]], &bufs[1][..lens[1]]);
+            assert_eq!(decode_pair_padded(e, u), (decode(e, b'e'), decode(u, b'u')), "{:?} {:?}", e, u);
         }
         let mut out = Vec::new();
         for v in [0u64, 1, 35, 36, 1295, 1 << 20, M40 - 1, M40] {

@@ -45,15 +45,22 @@ unsafe extern "C" {
     fn _exit(code: i32) -> !;
 }
 
-/// The image ships a portable build (the entry point) and an x86-64-v3 build.
-/// The portable build re-executes the v3 build when this CPU has every v3
-/// feature, so a scorer CPU without AVX2/BMI2 still runs the portable code.
+/// The image ships a portable build (the entry point), an x86-64-v3 build and
+/// an x86-64-v4 (AVX-512) build. The portable build re-executes the widest
+/// build whose every feature this CPU has, so an older scorer CPU still runs
+/// correct code. `SHOPPING_BUILD=portable|v3|v4` caps the choice (for tests).
 #[cfg(target_arch = "x86_64")]
 fn dispatch_cpu_build() {
     use std::os::unix::process::CommandExt;
-    if cfg!(target_feature = "avx2") || env::var_os("SHOPPING_PORTABLE").is_some() {
+    if cfg!(target_feature = "avx2") {
         return;
     }
+    let cap = match env::var("SHOPPING_BUILD").ok().as_deref() {
+        Some("portable") => 0,
+        Some("v3") => 3,
+        _ if env::var_os("SHOPPING_PORTABLE").is_some() => 0,
+        _ => 4,
+    };
     let v3 = is_x86_feature_detected!("avx")
         && is_x86_feature_detected!("avx2")
         && is_x86_feature_detected!("bmi1")
@@ -65,20 +72,27 @@ fn dispatch_cpu_build() {
         && is_x86_feature_detected!("popcnt")
         && is_x86_feature_detected!("sse4.2")
         && is_x86_feature_detected!("xsave");
-    if !v3 {
-        return;
-    }
+    let v4 = v3
+        && is_x86_feature_detected!("avx512f")
+        && is_x86_feature_detected!("avx512bw")
+        && is_x86_feature_detected!("avx512cd")
+        && is_x86_feature_detected!("avx512dq")
+        && is_x86_feature_detected!("avx512vl");
     let Ok(exe) = env::current_exe() else { return };
-    let target = exe.with_file_name("shopping-fast-v3");
-    if !target.is_file() {
-        return;
+    let mut candidates = Vec::new();
+    if v4 && cap >= 4 {
+        candidates.push("shopping-fast-v4");
     }
-    let mut command = std::process::Command::new(&target);
-    command.args(env::args_os().skip(1));
-    // No transparent huge pages: on a host short of free memory, THP faults
-    // stall in direct compaction (measured: the event scan doubled).
-    // `exec` only returns on failure; then the portable build carries on.
-    let _ = command.exec();
+    if v3 && cap >= 3 {
+        candidates.push("shopping-fast-v3");
+    }
+    for name in candidates {
+        let target = exe.with_file_name(name);
+        if target.is_file() {
+            // `exec` only returns on failure; then try the next build.
+            let _ = std::process::Command::new(&target).args(env::args_os().skip(1)).exec();
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -212,6 +226,56 @@ impl IdTable {
     }
 }
 
+/// Packed product ID -> category, as two flat arrays (keys probed first), so
+/// the purchase lookup stays in L2. Unpackable IDs use `Catalog::products`.
+struct PackedMap {
+    keys: Vec<u64>,
+    vals: Vec<u32>,
+    shift: u32,
+}
+
+impl PackedMap {
+    fn new(n: usize) -> Self {
+        let size = (n * 2).next_power_of_two().max(16);
+        Self { keys: vec![0; size], vals: vec![0; size], shift: 64 - size.trailing_zeros() }
+    }
+
+    #[inline(always)]
+    fn slot(&self, key: u64) -> usize {
+        (key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> self.shift) as usize
+    }
+
+    /// First insertion wins, as in `IdTable::insert_or_get`.
+    fn insert(&mut self, key: u64, val: u32) {
+        let mask = self.keys.len() - 1;
+        let mut i = self.slot(key);
+        while self.keys[i] != 0 {
+            if self.keys[i] == key {
+                return;
+            }
+            i = (i + 1) & mask;
+        }
+        self.keys[i] = key;
+        self.vals[i] = val;
+    }
+
+    #[inline(always)]
+    fn get(&self, key: u64) -> Option<u32> {
+        let mask = self.keys.len() - 1;
+        let mut i = self.slot(key);
+        loop {
+            let k = self.keys[i];
+            if k == key {
+                return Some(self.vals[i]);
+            }
+            if k == 0 {
+                return None;
+            }
+            i = (i + 1) & mask;
+        }
+    }
+}
+
 struct Catalog {
     window_start: i64,
     window_end: i64,
@@ -219,6 +283,7 @@ struct Catalog {
     unknown_cat_id: u32,
     product_arena: FallbackArena,
     products: IdTable,            // product_id -> category_id (as u32)
+    packed_products: PackedMap,   // the same, for packable product IDs
     campaign_names: Vec<Vec<u8>>, // index 0 is "organic", 1..=C are sorted by campaign_id
     campaign_channels: Vec<Vec<u8>>,
     campaign_arena: FallbackArena,
@@ -279,11 +344,15 @@ fn build_catalog(data_dir: &Path) -> io::Result<Catalog> {
 
     let mut product_arena = FallbackArena::new();
     let mut products = IdTable::with_capacity(raw_products.len().max(16));
+    let mut packed_products = PackedMap::new(raw_products.len());
     let mut tmp_prod_arena = FallbackArena::new();
     for (pid, cat) in raw_products {
         let cat_id = cat_set.binary_search(&cat).unwrap() as u32;
         tmp_prod_arena.bytes.clear();
         let packed = tmp_prod_arena.pack_or_push(pid);
+        if packed.is_packed() {
+            packed_products.insert(packed.0, cat_id);
+        }
         products.insert_or_get(packed, &tmp_prod_arena.bytes, &mut product_arena, |_| {
             cat_id
         });
@@ -324,6 +393,7 @@ fn build_catalog(data_dir: &Path) -> io::Result<Catalog> {
         unknown_cat_id,
         product_arena,
         products,
+        packed_products,
         campaign_names,
         campaign_channels,
         campaign_arena,
@@ -357,11 +427,14 @@ impl Catalog {
 }
 
 fn build_links(data_dir: &Path, ncpu: usize) -> io::Result<LinkPart> {
+    let use_pread = env::var("SHOPPING_PREAD").ok().as_deref() == Some("1");
     // 3. Read links/*.csv in parallel chunks and build connected components
     let link_inputs = scan::plan(&data_dir.join("links"), SCAN_CHUNK)?;
     let link_chunks = &link_inputs.chunks;
     let next_chunk = AtomicUsize::new(0);
-    let thread_count = ncpu.min(link_chunks.len().max(1));
+    // Links are small; two readers keep the link build from competing with the
+    // event scan it overlaps.
+    let thread_count = ncpu.min(2).min(link_chunks.len().max(1));
     let partial_pairs: Mutex<Vec<(FallbackArena, Vec<(PackedId, PackedId)>)>> =
         Mutex::new(Vec::new());
 
@@ -377,9 +450,22 @@ fn build_links(data_dir: &Path, ncpu: usize) -> io::Result<LinkPart> {
                         break;
                     };
                     let f = file_idx as usize;
-                    let (bytes, first, stop) = reader
-                        .load(&link_inputs.files[f], link_inputs.sizes[f], start, end)
-                        .expect("read links");
+                    let (bytes, first, stop, mapped) = if use_pread {
+                        let (b, x, y) = reader
+                            .load(&link_inputs.files[f], link_inputs.sizes[f], start, end)
+                            .expect("read links");
+                        (b, x, y, false)
+                    } else {
+                        reader
+                            .load_mapped(
+                                &link_inputs.files[f],
+                                link_inputs.sizes[f],
+                                link_inputs.maps[f].as_slice(),
+                                start,
+                                end,
+                            )
+                            .expect("read links")
+                    };
                     scan::for_each_record::<2>(bytes, first, stop, |[id_a, id_b]| {
                         if !id_a.is_empty() && !id_b.is_empty() {
                             let pa = arena.pack_or_push_padded(id_a);
@@ -387,6 +473,9 @@ fn build_links(data_dir: &Path, ncpu: usize) -> io::Result<LinkPart> {
                             pairs.push((pa, pb));
                         }
                     });
+                    if mapped {
+                        scan::unmap_pages(bytes, first, stop);
+                    }
                 }
                 if !pairs.is_empty() {
                     partial_pairs.lock().unwrap().push((arena, pairs));
@@ -512,7 +601,12 @@ struct PersonEventBatch {
 /// and classify person slots from the actual links. `None` disables the fast
 /// path (everything then takes the exact solver).
 fn prepare_fast(catalog: &Catalog, inputs: &scan::Inputs, ncpu: usize) -> Option<(Keys, People)> {
-    if env::var("SHOPPING_FAST").ok().as_deref() == Some("0") || catalog.categories.len() > 65_535 {
+    // The fast record holds a 16-bit category and a 40-bit window offset (34.8
+    // years of ms); beyond those the exact solver runs everything.
+    if env::var("SHOPPING_FAST").ok().as_deref() == Some("0")
+        || catalog.categories.len() > 65_536
+        || catalog.window_end.saturating_sub(catalog.window_start) > fastpath::M40 as i64
+    {
         return None;
     }
     let total: u64 = inputs.sizes.iter().sum();
@@ -549,7 +643,11 @@ fn prepare_fast(catalog: &Catalog, inputs: &scan::Inputs, ncpu: usize) -> Option
     // beyond them simply takes the exact path.
     let est_lines = total / (bytes_seen / lines).max(1) + 1;
     let event_cap = (est_lines * 3 / 2 + Q as u64).div_ceil(Q as u64) * Q as u64;
-    let person_cap = (est_lines / 4).next_power_of_two().clamp(1 << 16, 1 << 26);
+    // About one generator person per 30 event lines: lines / 15 rounded up to a
+    // power of two keeps at least 2x headroom (8M slots at 60M) while the
+    // 16-byte slot table stays cache-sized (32 MB at 20M). People beyond the
+    // bound take the exact path.
+    let person_cap = (est_lines / 15).next_power_of_two().clamp(1 << 16, 1 << 26);
     let keys = fastpath::recover(&ev, &us, &pairs, event_cap, person_cap, est_lines, ncpu)?;
     Some((keys, People::new(keys.person_cap as usize)))
 }
@@ -659,6 +757,7 @@ fn run_pipeline(
     assist_sweep: bool,
 ) -> io::Result<()> {
     let t0 = Instant::now();
+    let use_pread = env::var("SHOPPING_PREAD").ok().as_deref() == Some("1");
     ensure_output_dirs(output_dir)?;
 
     // Stage 1: products and campaigns (links are built during the event scan)
@@ -675,7 +774,7 @@ fn run_pipeline(
     let t_fast_prep = t0.elapsed();
     let worker_fast: Mutex<Vec<(usize, Vec<Vec<FastRec>>, FallbackArena)>> = Mutex::new(Vec::new());
     let next_worker_id = AtomicUsize::new(0);
-    let event_workers = ncpu.min(event_chunks.len().max(1));
+    let event_workers = ncpu.min(event_chunks.len().max(1)).min(fastpath::MAX_WORKERS);
     let next_ev_chunk = AtomicUsize::new(0);
     let worker_ev_shards: Mutex<Vec<Vec<EventBatch>>> =
         Mutex::new(Vec::with_capacity(event_workers));
@@ -685,9 +784,14 @@ fn run_pipeline(
     let link_result: Mutex<Option<io::Result<LinkPart>>> = Mutex::new(None);
 
     thread::scope(|outer| {
-    outer.spawn(|| {
-        *link_result.lock().unwrap() = Some(build_links(data_dir, ncpu));
-    });
+    // Diagnostic: SHOPPING_SCAN_ONLY=1 measures the event scan alone (no link
+    // build, exit right after the scan, no output).
+    let scan_only = env::var("SHOPPING_SCAN_ONLY").ok().as_deref() == Some("1");
+    if !scan_only {
+        outer.spawn(|| {
+            *link_result.lock().unwrap() = Some(build_links(data_dir, ncpu));
+        });
+    }
     thread::scope(|scope| {
         for _ in 0..event_workers {
             scope.spawn(|| {
@@ -705,9 +809,22 @@ fn run_pipeline(
                         break;
                     };
                     let f = file_idx as usize;
-                    let (bytes, first, stop) = reader
-                        .load(&event_inputs.files[f], event_inputs.sizes[f], start, end)
-                        .expect("read events");
+                    let (bytes, first, stop, mapped) = if use_pread {
+                        let (b, x, y) = reader
+                            .load(&event_inputs.files[f], event_inputs.sizes[f], start, end)
+                            .expect("read events");
+                        (b, x, y, false)
+                    } else {
+                        reader
+                            .load_mapped(
+                                &event_inputs.files[f],
+                                event_inputs.sizes[f],
+                                event_inputs.maps[f].as_slice(),
+                                start,
+                                end,
+                            )
+                            .expect("read events")
+                    };
                     scan::for_each_record::<7>(bytes, first, stop, |fields| {
                         let [
                             event_id,
@@ -732,9 +849,16 @@ fn run_pipeline(
                         let mut cat_id = catalog.unknown_cat_id;
 
                         if !user_id.is_empty() && !product_id.is_empty() {
-                            let type_code = match event_type {
-                                b"view" | b"cart" => 1u8,
-                                b"purchase" => 2u8,
+                            // Word compares: exactly `view`, `cart` or `purchase`.
+                            let type_code = match event_type.len() {
+                                4 => {
+                                    let w = u32::from_le_bytes(event_type.try_into().unwrap());
+                                    (w == u32::from_le_bytes(*b"view") || w == u32::from_le_bytes(*b"cart")) as u8
+                                }
+                                8 => {
+                                    let w = u64::from_le_bytes(event_type.try_into().unwrap());
+                                    2 * (w == u64::from_le_bytes(*b"purchase")) as u8
+                                }
                                 _ => 0u8,
                             };
                             if type_code != 0 {
@@ -761,12 +885,8 @@ fn run_pipeline(
                                             let prod_pid = if type_code != 2 {
                                                 None
                                             } else {
-                                                match id::try_pack(product_id) {
-                                                    Some(p) => catalog.products.get(
-                                                        p,
-                                                        &[],
-                                                        &catalog.product_arena.bytes,
-                                                    ),
+                                                match id::try_pack_padded(product_id) {
+                                                    Some(p) => catalog.packed_products.get(p.0),
                                                     None => {
                                                         let mut tmp = FallbackArena::new();
                                                         let p = tmp.push_fallback(product_id);
@@ -788,28 +908,30 @@ fn run_pipeline(
                         }
 
                         if let Some((keys, people)) = fast_ref {
-                            if let Some(counter) = keys.event_counter(event_id) {
+                            let (event_counter, user_counter) = keys.pair_counters(event_id, user_id);
+                            if let Some(counter) = event_counter {
                                 let user = if !valid {
                                     fastpath::INVALID
-                                } else if let Some(u) = keys.user_counter(user_id) {
+                                } else if let Some(u) = user_counter {
                                     u
                                 } else {
                                     let off = fast_arena.push_fallback(user_id).0 & !(1u64 << 63);
-                                    fastpath::OPAQUE | (wid << 48) | off
+                                    assert!(off <= fastpath::M40, "opaque arena over 1 TiB");
+                                    fastpath::OPAQUE | (wid << 40) | off
                                 };
-                                fast_buckets[(counter >> QB) as usize].push(FastRec {
-                                    ingest: ingest_ts,
-                                    ts: ts_val,
+                                fast_buckets[(counter >> QB) as usize].push(FastRec::new(
+                                    ingest_ts,
+                                    counter,
                                     user,
-                                    price: price_val,
-                                    cat: cat_id as u16,
-                                    low: (counter as usize & (Q - 1)) as u16,
-                                });
+                                    ts_val.wrapping_sub(catalog.window_start) as u64,
+                                    price_val,
+                                    cat_id,
+                                ));
                                 return;
                             }
                             // An exact-path row naming a fast-shaped user makes that person exact.
                             if valid {
-                                if let Some(u) = keys.user_counter(user_id) {
+                                if let Some(u) = user_counter {
                                     people.complex((u >> 9) as usize);
                                 }
                             }
@@ -841,6 +963,9 @@ fn run_pipeline(
                             cat_id,
                         });
                     });
+                    if mapped {
+                        scan::unmap_pages(bytes, first, stop);
+                    }
                 }
                 worker_ev_shards.lock().unwrap().push(shards);
                 if fast_ref.is_some() {
@@ -851,6 +976,10 @@ fn run_pipeline(
     });
     });
     let t_ev_scan = t0.elapsed();
+    if env::var("SHOPPING_SCAN_ONLY").ok().as_deref() == Some("1") {
+        eprintln!("scan_only_ms={:.1}", (t_ev_scan - t_fast_prep).as_secs_f64() * 1000.0);
+        unsafe { _exit(0) }
+    }
     catalog.install_links(link_result.into_inner().unwrap().expect("link builder ran")?);
     if let Some((keys, people)) = fast_ref {
         classify_people(&catalog, keys, people, ncpu);
@@ -1000,7 +1129,7 @@ fn run_pipeline(
         thread::scope(|scope| {
             for _ in 0..ncpu {
                 scope.spawn(|| {
-                    let blank = FastRec { ingest: 0, ts: 0, user: 0, price: 0, cat: 0, low: 0 };
+                    let blank = FastRec { key: 0, user: 0, time_price: 0 };
                     let mut slot = vec![blank; Q];
                     let mut gen_of = vec![0u32; Q];
                     let mut stamp = 0u32;
@@ -1015,11 +1144,11 @@ fn run_pipeline(
                         for part in &parts {
                             rows += part.len();
                             for r in part {
-                                let s = r.low as usize;
+                                let s = r.low();
                                 if gen_of[s] != stamp {
                                     gen_of[s] = stamp;
                                     slot[s] = *r;
-                                } else if r.ingest < slot[s].ingest {
+                                } else if r.ingest() < slot[s].ingest() {
                                     slot[s] = *r;
                                 }
                             }
@@ -1038,15 +1167,15 @@ fn run_pipeline(
                                 continue;
                             }
                             let r = &slot[s];
-                            if r.user & fastpath::INVALID != 0 {
+                            if r.is_invalid() {
                                 continue;
                             }
                             winners.push(*r);
-                            if r.user & fastpath::OPAQUE == 0
-                                && people.check_alias(r.user)
-                                && (r.user >> 9) as usize != last_claimed
+                            if !r.is_opaque()
+                                && people.check_alias(r.counter())
+                                && (r.counter() >> 9) as usize != last_claimed
                             {
-                                let p = (r.user >> 9) as usize;
+                                let p = (r.counter() >> 9) as usize;
                                 last_claimed = p;
                                 if let Err(cur) = people.slots[p].claim.compare_exchange(
                                     0,
@@ -1095,9 +1224,22 @@ fn run_pipeline(
                         break;
                     };
                     let f = file_idx as usize;
-                    let (bytes, first, stop) = reader
-                        .load(&click_inputs.files[f], click_inputs.sizes[f], start, end)
-                        .expect("read clicks");
+                    let (bytes, first, stop, mapped) = if use_pread {
+                        let (b, x, y) = reader
+                            .load(&click_inputs.files[f], click_inputs.sizes[f], start, end)
+                            .expect("read clicks");
+                        (b, x, y, false)
+                    } else {
+                        reader
+                            .load_mapped(
+                                &click_inputs.files[f],
+                                click_inputs.sizes[f],
+                                click_inputs.maps[f].as_slice(),
+                                start,
+                                end,
+                            )
+                            .expect("read clicks")
+                    };
                     scan::for_each_record::<4>(bytes, first, stop, |fields| {
                         let [click_id, user_id, campaign_id, ts_text] = fields;
                         if click_id.is_empty() || user_id.is_empty() || campaign_id.is_empty() {
@@ -1163,6 +1305,9 @@ fn run_pipeline(
                             campaign_idx: camp_idx as u32,
                         });
                     });
+                    if mapped {
+                        scan::unmap_pages(bytes, first, stop);
+                    }
                 }
                 person_cl_partials.lock().unwrap().push(shards);
                 if fast_ref.is_some() {
@@ -1323,17 +1468,18 @@ fn run_pipeline(
                         fast_evs.clear();
                         fast_cls.clear();
                         for r in &winners {
-                            if r.user & fastpath::OPAQUE != 0 {
-                                let t = ((r.user >> 48) & 0x3FFF) as usize;
+                            let ts = window_start + r.ts_off();
+                            if r.is_opaque() {
+                                let (t, off) = r.opaque_ref();
                                 let arena = &fast_workers[t].bytes;
-                                let id = PackedId::from_fallback((r.user & ((1u64 << 48) - 1)) as usize);
+                                let id = PackedId::from_fallback(off);
                                 let (o, l) = id.fallback_span(arena);
-                                exact_event(&arena[o..o + l], r.ts, r.price, r.cat as u32, &mut scratch);
-                            } else if people.is_complex((r.user >> 9) as usize) {
-                                keys.user_id(r.user, &mut idbuf);
-                                exact_event(&idbuf, r.ts, r.price, r.cat as u32, &mut scratch);
+                                exact_event(&arena[o..o + l], ts, r.price(), r.cat(), &mut scratch);
+                            } else if people.is_complex((r.counter() >> 9) as usize) {
+                                keys.user_id(r.counter(), &mut idbuf);
+                                exact_event(&idbuf, ts, r.price(), r.cat(), &mut scratch);
                             } else {
-                                fast_evs.push(((r.user >> 9) as u32, r.ts, r.price, r.cat as u32));
+                                fast_evs.push(((r.counter() >> 9) as u32, ts, r.price(), r.cat()));
                             }
                         }
                         for clicks in fast_click_workers.iter() {
@@ -1688,7 +1834,13 @@ fn run_pipeline(
         eprintln!(
             "scanner={} build={}",
             parse::scanner_name(),
-            if cfg!(target_feature = "avx2") { "v3" } else { "portable" }
+            if cfg!(target_feature = "avx512bw") {
+                "v4"
+            } else if cfg!(target_feature = "avx2") {
+                "v3"
+            } else {
+                "portable"
+            }
         );
         eprintln!(
             "timing_ms: catalog={:.1} fast_prep={:.1} ev_scan_and_links={:.1} classify={:.1} ev_dedup={:.1} fast_dedup={:.1} cl_scan={:.1} click_route={:.1} fast_sessions={:.1} sessions_and_user_write={:.1} cleanup_and_campaign_write={:.1} total={:.1} fast={} fast_people={}",

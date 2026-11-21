@@ -391,7 +391,7 @@ impl Default for DateCache {
 /// `parse_calendar_part` with a cache of validated dates.
 #[inline(always)]
 pub fn parse_calendar_cached(text: &[u8], cache: &mut DateCache) -> Option<i64> {
-    if text.len() != 19 || text[10] != b'T' || text[13] != b':' || text[16] != b':' {
+    if text.len() != 19 || text[10] != b'T' {
         return None;
     }
     let key = u64::from_le_bytes(text[0..8].try_into().unwrap());
@@ -415,13 +415,28 @@ pub fn parse_calendar_cached(text: &[u8], cache: &mut DateCache) -> Option<i64> 
         cache.days[slot] = days;
         days
     };
-    let hour = parse_2digits(text[11], text[12])?;
-    let minute = parse_2digits(text[14], text[15])?;
-    let second = parse_2digits(text[17], text[18])?;
+    let (hour, minute, second) = hh_mm_ss(text)?;
     if hour > 23 || minute > 59 || second > 59 {
         return None;
     }
     Some(((days * 24 + hour) * 60 + minute) * MS_PER_MINUTE + second * MS_PER_SECOND)
+}
+
+/// `HH:MM:SS` at bytes 11..19 by SWAR on one 8-byte word: the colons, then
+/// every digit byte has high nibble 3 and low nibble at most 9, then each pair
+/// as `d0 * 10 + d1` from one multiply-add.
+#[inline(always)]
+fn hh_mm_ss(text: &[u8]) -> Option<(i64, i64, i64)> {
+    let w = u64::from_le_bytes(text[11..19].try_into().unwrap());
+    if w & 0x0000_FF00_00FF_0000 != 0x0000_3A00_003A_0000
+        || w & 0xF0F0_00F0_F000_F0F0 != 0x3030_0030_3000_3030
+        || ((w & 0x0F0F_000F_0F00_0F0F) + 0x0606_0006_0600_0606) & 0x1010_0010_1000_1010 != 0
+    {
+        return None;
+    }
+    let t = w & 0x0F0F_000F_0F00_0F0F;
+    let v = t * 10 + (t >> 8);
+    Some(((v & 0xFF) as i64, ((v >> 24) & 0xFF) as i64, ((v >> 48) & 0xFF) as i64))
 }
 
 /// `parse_f1` with a date cache.
@@ -683,6 +698,53 @@ mod tests {
                     parse_csv_line_scalar::<4>(&line)
                 );
             }
+        }
+    }
+    #[test]
+    fn swar_time_matches_bytes() {
+        let mut t = *b"2027-07-28T00:00:00";
+        let mut check = |t: &[u8; 19]| {
+            let d = |i: usize| t[i].is_ascii_digit();
+            let want = if d(11) && d(12) && t[13] == b':' && d(14) && d(15) && t[16] == b':' && d(17) && d(18) {
+                let two = |i: usize| ((t[i] - b'0') * 10 + (t[i + 1] - b'0')) as i64;
+                Some((two(11), two(14), two(17)))
+            } else {
+                None
+            };
+            assert_eq!(hh_mm_ss(t), want, "{:?}", String::from_utf8_lossy(t));
+        };
+        for pos in 11..19 {
+            for a in 0..=255u8 {
+                for b in [b'0', b'5', b'9', b':', b'/', b'@', 0x80, 0xFF] {
+                    let mut u = t;
+                    u[pos] = a;
+                    u[if pos == 18 { 11 } else { pos + 1 }] = b;
+                    check(&u);
+                }
+            }
+        }
+        for h in 0..100u8 {
+            t[11] = b'0' + h / 10;
+            t[12] = b'0' + h % 10;
+            check(&t);
+        }
+    }
+    #[test]
+    fn calendar_matches_scalar_on_mutations() {
+        let mut cache = DateCache::default();
+        let mut rng = 0xA076_1D64_78BD_642Fu64;
+        let bases: [&[u8; 19]; 4] = [b"2027-07-28T12:46:07", b"2028-02-29T23:59:59", b"0000-01-01T00:00:00", b"2027-12-31T09:05:01"];
+        let alphabet = b"0123456789-T:Z t/;";
+        for _ in 0..400000 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let mut t = *bases[(rng % 4) as usize];
+            for k in 0..((rng >> 8) % 3) {
+                let i = ((rng >> (16 + 8 * k)) % 19) as usize;
+                t[i] = alphabet[((rng >> (20 + 8 * k)) % alphabet.len() as u64) as usize];
+            }
+            assert_eq!(parse_calendar_cached(&t, &mut cache), parse_calendar_part(&t), "{:?}", String::from_utf8_lossy(&t));
         }
     }
     #[test]

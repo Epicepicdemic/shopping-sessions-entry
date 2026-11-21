@@ -20,7 +20,10 @@ pub struct Sink {
     pub ucols: UserCols,
     pub camp_grid: Vec<CampAcc>,
     pub camp_extra: HashMap<(u32, i32), CampAcc>,
-    cat_revenue: Vec<i64>,
+    /// The current user-day's purchase categories and summed cents: a sparse
+    /// list (purchases are a few percent of events), so the cost does not
+    /// grow with the catalog's category count.
+    cat_revenue: Vec<(u32, i64)>,
     sessions_buf: Vec<(i32, i64, i64, i64, bool)>,
     assist_stamp: Vec<u32>,
     cur_stamp: u32,
@@ -39,7 +42,7 @@ impl Sink {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         num_campaigns: usize,
-        num_categories: usize,
+        _num_categories: usize,
         window_days: usize,
         base_day: i32,
         window_start: i64,
@@ -51,7 +54,7 @@ impl Sink {
             ucols: UserCols::with_capacity(64_000),
             camp_grid: vec![CampAcc::default(); num_campaigns * window_days],
             camp_extra: HashMap::new(),
-            cat_revenue: vec![0i64; num_categories],
+            cat_revenue: Vec::with_capacity(8),
             sessions_buf: Vec::new(),
             assist_stamp: vec![0u32; num_campaigns],
             cur_stamp: 0,
@@ -104,18 +107,18 @@ impl Sink {
              events: i64,
              rev: i64,
              has_purch: bool,
-             cat_rev: &mut [i64]| {
+             cat_rev: &mut Vec<(u32, i64)>| {
+                // Highest summed cents; a tie goes to the smallest index, which
+                // is the byte-wise smallest name (categories are sorted).
                 let top_cat = if has_purch {
-                    let mut best_c = 0u32;
-                    let mut best_v = -1i64;
-                    for (c_idx, &v) in cat_rev.iter().enumerate() {
-                        if v > best_v {
-                            best_v = v;
-                            best_c = c_idx as u32;
+                    let mut best = cat_rev[0];
+                    for &(c, v) in &cat_rev[1..] {
+                        if v > best.1 || (v == best.1 && c < best.0) {
+                            best = (c, v);
                         }
                     }
-                    cat_rev.fill(0);
-                    Some(best_c)
+                    cat_rev.clear();
+                    Some(best.0)
                 } else {
                     None
                 };
@@ -169,7 +172,10 @@ impl Sink {
                 sess_has_purch = true;
                 day_rev += p64;
                 day_has_purchases = true;
-                self.cat_revenue[cat_id as usize] += p64;
+                match self.cat_revenue.iter_mut().find(|e| e.0 == cat_id) {
+                    Some(e) => e.1 += p64,
+                    None => self.cat_revenue.push((cat_id, p64)),
+                }
             }
             prev_ts = ts;
         }
