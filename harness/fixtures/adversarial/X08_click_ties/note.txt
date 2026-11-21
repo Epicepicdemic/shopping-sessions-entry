@@ -1,0 +1,1 @@
+Clicks step 4: "take the one with the latest `ts`; on a tie in `ts`, the smallest `click_id`, compared byte by byte." Step 7: "Each such campaign assists the session once".

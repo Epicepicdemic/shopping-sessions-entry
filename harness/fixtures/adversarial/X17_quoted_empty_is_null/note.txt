@@ -1,0 +1,1 @@
+CSV dialect: "`""` is an empty field. ... An empty field means null." Events step 3: "Drop the event unless `user_id` is non-empty ... and `product_id` is non-empty."

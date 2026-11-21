@@ -1,0 +1,1 @@
+Events step 6: "One day per session: the UTC date of its start. All its events and purchases count on that day, even those after midnight." Timestamps F2: "subtract it to get UTC."

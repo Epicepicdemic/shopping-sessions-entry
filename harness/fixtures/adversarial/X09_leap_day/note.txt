@@ -1,0 +1,1 @@
+Timestamps: "an impossible calendar value (month 13, February 30, February 29 outside a leap year ...)" is bad, so February 29 in a leap year is valid; Clicks step 4: "`session_start - click.ts <= 7 days` (604,800,000 ms)".

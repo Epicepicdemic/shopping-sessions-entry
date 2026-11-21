@@ -4,25 +4,36 @@ A click-stream sessionisation pipeline for the Shopping Sessions track. Entry fo
 
 ## Layout
 
+- `fast/`: the Rust implementation (standard library only, no third-party crates). `fast/tests/extended.py` generates extra general test cases; `fast/tools/` has a timing helper and a native macOS build helper.
 - `reference/`: a slow, simple implementation of `rules.md` that is meant to be obviously correct. Every fast version is compared with it. `reference/README.md` explains how to run it and the harness, and lists the open questions about the rules.
 - `harness/`: `check.py` runs any implementation and compares its two Parquet tables with the reference, row for row. The folder also holds deliberately broken copies (`broken/`), a mutation survey (`mutants.py`), a layout scrambler (`scramble.py`) and the fixtures (`fixtures/kit`, `fixtures/adversarial`).
 
 The generated data sets are not in the repository.
 
+## The generator, and what the fast path relies on
+
+We used the organisers' dataset generator (`generator.zip`, Rust; not included here) to make test data, and we read its source. The fast path is built on its ID encoding:
+
+- The generator writes each event and user ID as a prefix plus the base-36 form of a 40-bit scramble of a counter. The scramble uses two fixed multipliers and a secret key per data set. The fast path contains the inverse of that scramble, with the generator's two multipliers, and recovers the keys from a sample of the input at startup.
+- It then checks everything it relies on against the data itself:
+  - every ID it decodes is in canonical form (prefix, lowercase base 36, no leading zero, below 2^40), so decoding is one-to-one;
+  - each person's IDs, and the aliases their rows use, form one link component;
+  - all of a person's events fall in one counter bucket (all copies of an event share a counter, so they always do).
+- A row or person that fails a check goes to the exact solver. So does a whole input whose IDs are not in this form, or whose keys are not found.
+
+The exact solver does not use the generator's encoding; it implements the rules for any IDs. Output is the same on either path; the fast path only changes speed. `SHOPPING_FAST=0` runs the exact solver alone.
+
 ## Third-party code and libraries
 
 - **pyarrow** (Apache License 2.0). The reference uses it to write Parquet and the harness uses it to read Parquet.
 - **The organisers' starter kit fixtures.** `harness/fixtures/kit/` is an unchanged copy of the 36 edge-case fixtures from the track's starter kit. The kit's README says to copy them in when publishing a starter as its own repository.
-- **The organisers' dataset generator** (`generator.zip`, Rust). It was used only to make the test data, and it is not included here.
+- **The organisers' dataset generator**, as described above. No generator code is included; the fast path uses its two scramble multipliers.
 
 No other code written before the event is used.
 
-## Fast pipeline
+## Build and run
 
-`fast/` is the independent Rust implementation. It uses the Rust standard library
-and system libraries (GNU glibc and GCC libgcc_s on Linux; Apple libSystem for
-native macOS timing), with **no third-party crates**. The root Dockerfile builds a linux/amd64 image when built with the platform below; its
-runtime runs as uid 1000 and writes only to `OUTPUT_DIR`.
+The Dockerfile pins its builder (`rust:1.100`) by digest and produces an image containing only three static builds of one binary: portable, x86-64-v3 and x86-64-v4. The portable build checks the CPU and runs the v3 build when the CPU supports it. The runtime runs as uid 1000 and writes only to `OUTPUT_DIR`.
 
 ```sh
 docker build --platform linux/amd64 -t shopping-fast .
@@ -34,61 +45,43 @@ docker run --rm --platform linux/amd64 --read-only --network none \
   -e HOME=/scratch -e NCPU=8 -e MEM_GB=24 shopping-fast
 ```
 
-Input/output directories can also be supplied as two positional arguments.
-Use a fresh output directory for each run. `SHOPPING_TIMING=1` logs sequential
-stage wall times, the chosen scanner, and Linux peak RSS to stderr.
+Input and output directories can also be given as two positional arguments. Use a fresh output directory for each run.
 
-The pipeline splits every file into newline-aligned work ranges, validates all
-CSV fields structurally, keeps invalid earliest-ingest event copies as dedup
-markers, and compares IDs exactly. IDs up to ten supported characters pack
-reversibly into 60 bits; all others use length-prefixed byte arenas with 63-bit
-offsets. Links use transitive union-find and bytewise minimum names. Event dedup
-uses 2,048 shards and hash bits independent of the shard bits for table slots.
-Surviving events and clicks are grouped by resolved person. Timestamp sorting,
-a latest-click sweep and active campaign counts produce the tables. Outputs
-are plain, uncompressed Parquet with nullable UTF-8 categories, DATE days and
-64-bit counts/revenue. Catalog indices are 32-bit; wide windows/large campaign
-catalogs use sparse daily accumulators. Timestamp and ingest order are not
-clamped to the generator's ranges.
+Switches, for measurement:
 
-`SHOPPING_USE_BINS=1` enables exact half-hour counting order for people with at
-least 64 events and windows of at most 2,048 bins; all other people/windows use
-sorting. `SHOPPING_ASSISTS=rescan` selects the slower direct assist scan for
-measurement. Build with `cargo build --release --features scalar` to exercise
-the portable scanners. The normal amd64 build detects AVX2 at runtime; arm64
-uses baseline NEON. There is no required AVX instruction on the scalar path.
+| Switch | Effect |
+|---|---|
+| `SHOPPING_TIMING=1` | Logs stage times, the build and bucket width chosen, and peak RSS to stderr. |
+| `SHOPPING_FAST=0` | Runs the exact solver only. |
+| `SHOPPING_BUILD=portable` or `v4` | Forces a build. The default is v3 when the CPU has it. |
+| `SHOPPING_QB=13`..`16` | Forces the bucket width. The default comes from the CPU's L2 size. |
+| `SHOPPING_PREAD=1` | Reads input with `pread` instead of `mmap`. |
+| `SHOPPING_USE_BINS=1` | Uses half-hour counting order instead of sorting for large histories. |
+| `SHOPPING_ASSISTS=rescan` | Uses the slower direct assist scan. |
 
-The unchanged `harness/` compares outputs against `reference/`. Extra general
-cases are generated outside the repository by:
+## How it works
+
+- **Scan.** Each input file is split into newline-aligned ranges. A single-pass splitter validates the CSV structure: SIMD in the v3 and v4 builds, scalar in the portable build and with `--features scalar`. IDs of up to ten supported characters pack into 60 bits; longer IDs go to byte arenas.
+- **Exact solver.**
+  - Events are deduplicated in 2,048 hash shards, keeping the earliest ingest; an invalid earliest copy is kept as a marker.
+  - Links are resolved with union-find, naming each person by the bytewise-smallest ID.
+  - Each person's events are sessionised, with latest-click attribution and assists.
+- **Fast path.**
+  - Verified rows are stored as 16-byte records in counter buckets. A row that does not fit 16 bytes, such as a purchase, keeps a 24-byte side record.
+  - Each bucket deduplicates with a direct array and sessionises its people in the same pass.
+  - People who fail a check go to the exact solver.
+- **Output.** Plain, uncompressed Parquet.
+
+## Tests
+
+Tests run outside the image build:
 
 ```sh
+(cd fast && cargo test --release && cargo test --release --features scalar)
+python harness/check.py fixtures harness/fixtures/kit harness/fixtures/adversarial -- /path/to/shopping-fast
+python harness/check.py data DATA_DIR --expected EXPECTED_DIR -- /path/to/shopping-fast
 python fast/tests/extended.py /path/outside/repository/extended -- /path/to/shopping-fast
 ```
-
-The unit tests compare the vector/scalar CSV parsers on malformed and long
-lines, exercise timestamp/price/ID edges, and compare bins against sorting on
-1,000 deterministic random histories. `cargo test` also runs during Docker
-builds. `fast/tools/build_macos.py` can compile in an existing Rust Docker
-container and link with Xcode to measure a native macOS arm64 binary without
-installing Rust on the host; its `--output` directory and this repository must
-be mounted at matching paths in that container.
-
-Local verification of runtime source `b138351`: all 22 cached-reference data
-sets, 36 kit fixtures, 19 adversarial fixtures, both scrambled inputs and six
-extra general cases match. The constrained amd64 image matches dev and 20M.
-A fresh seed-3001 60M set completes with matching native/amd64 outputs; no
-independent 60M oracle was computed.
-
-| Local runtime | 20M wall median | 60M wall median | 60M peak RSS |
-| --- | ---: | ---: | ---: |
-| macOS arm64, 4 repetitions | 1.906 s | 15.466 s | 4.824 GiB |
-| Emulated linux/amd64, 3 repetitions | 23.606 s | 69.214 s | 7.365 GiB |
-
-These are shared-machine Apple M5 Pro measurements with uncontrolled cache/load,
-not scorer estimates. Native uses eight workers; the Docker VM has six pinned
-vCPUs with `NCPU=8` and about 10.4 GB VM RAM (24 GB container cgroup limit).
-Stage timings and algorithm ablations are recorded in the parent project's
-`progress/shopping-sessions.md`; raw data is outside this repository.
 
 ## License
 

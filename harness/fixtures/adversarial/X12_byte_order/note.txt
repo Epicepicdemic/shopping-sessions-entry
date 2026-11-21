@@ -1,0 +1,1 @@
+Linked IDs step 3: "Name each person by the byte-wise smallest of their IDs." user_daily top_category: "a tie goes to the byte-wise smallest".

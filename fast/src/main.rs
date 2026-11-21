@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::thread;
 use std::time::Instant;
 
-use fastpath::{FastClick, FastRec, Keys, People, Q, QB};
+use fastpath::{FastClick, FastRec, Keys, People, Q_MAX, Rec16};
 use id::{FallbackArena, PackedId, fxhash_bytes};
 use io_util::{MmapFile, for_each_line, release};
 use sink::{CampAcc, Sink};
@@ -38,6 +38,10 @@ use parse::{
 const NUM_SHARDS: usize = 2048;
 /// Person slots per click group (2^10).
 const GROUP_BITS: u32 = 10;
+/// Widest person range a bucket groups by counting sort (else a comparison sort).
+const SORT_SPAN: usize = 1 << 18;
+/// Slots ahead of the bucket walk whose side records are prefetched.
+const SIDE_AHEAD: usize = 24;
 /// Raw bytes per scan chunk; the read buffer stays inside L2.
 const SCAN_CHUNK: u64 = 512 * 1024;
 
@@ -654,7 +658,7 @@ fn prepare_fast(catalog: &Catalog, inputs: &scan::Inputs, ncpu: usize) -> Option
     // Bounds come from this input's size, never from a practice set. Any row
     // beyond them simply takes the exact path.
     let est_lines = total / (bytes_seen / lines).max(1) + 1;
-    let event_cap = (est_lines * 3 / 2 + Q as u64).div_ceil(Q as u64) * Q as u64;
+    let event_cap = (est_lines * 3 / 2 + Q_MAX as u64).div_ceil(Q_MAX as u64) * Q_MAX as u64;
     // About one generator person per 30 event lines: lines / 15 rounded up to a
     // power of two keeps at least 2x headroom (8M slots at 60M) while the
     // 16-byte slot table stays cache-sized (32 MB at 20M). People beyond the
@@ -788,9 +792,14 @@ fn run_pipeline(
     let event_chunks = &event_inputs.chunks;
     let fast = prepare_fast(&catalog, &event_inputs, ncpu);
     let fast_ref = fast.as_ref();
-    let n_buckets = fast.as_ref().map_or(0, |(k, _)| (k.event_cap >> QB) as usize);
+    // Bucket width from this CPU's L2 (see `fastpath::bucket_bits`).
+    let (qb, l2_bytes, siblings) = fastpath::bucket_bits();
+    let q = 1usize << qb;
+    let n_buckets = fast.as_ref().map_or(0, |(k, _)| (k.event_cap >> qb) as usize);
     let t_fast_prep = t0.elapsed();
-    let worker_fast: Mutex<Vec<(usize, Vec<Vec<FastRec>>, FallbackArena)>> = Mutex::new(Vec::new());
+    let worker_fast: Mutex<Vec<(usize, Vec<Vec<Rec16>>, FallbackArena, Vec<FastRec>)>> =
+        Mutex::new(Vec::new());
+    let ingest_base = fastpath::ingest_base(catalog.window_start);
     let next_worker_id = AtomicUsize::new(0);
     let event_workers = ncpu.min(event_chunks.len().max(1)).min(fastpath::MAX_WORKERS);
     let next_ev_chunk = AtomicUsize::new(0);
@@ -815,9 +824,14 @@ fn run_pipeline(
             scope.spawn(|| {
                 let mut shards: Vec<EventBatch> =
                     (0..NUM_SHARDS).map(|_| EventBatch::default()).collect();
-                let mut fast_buckets: Vec<Vec<FastRec>> =
+                let mut fast_buckets: Vec<Vec<Rec16>> =
                     (0..n_buckets).map(|_| Vec::with_capacity(bucket_reserve)).collect();
                 let mut fast_arena = FallbackArena::new();
+                // Full records of rows that do not fit 16 bytes (purchases are 3%),
+                // one list per thread: filing them by bucket too cost the scan a
+                // second scattered write stream (45 ms) to save the walk 8 ms.
+                let mut fast_side: Vec<FastRec> =
+                    Vec::with_capacity(if n_buckets > 0 { bucket_reserve * n_buckets / 16 } else { 0 });
                 let wid = next_worker_id.fetch_add(1, AtomicOrdering::Relaxed) as u64;
                 let mut dates = DateCache::default();
                 let mut reader = scan::Reader::default();
@@ -938,13 +952,18 @@ fn run_pipeline(
                                     assert!(off <= fastpath::M40, "opaque arena over 1 TiB");
                                     fastpath::OPAQUE | (wid << 40) | off
                                 };
-                                fast_buckets[(counter >> QB) as usize].push(FastRec::new(
+                                let b = (counter >> qb) as usize;
+                                fast_buckets[b].push(Rec16::encode(
                                     ingest_ts,
+                                    ingest_base,
                                     counter,
                                     user,
                                     ts_val.wrapping_sub(catalog.window_start) as u64,
                                     price_val,
                                     cat_id,
+                                    catalog.unknown_cat_id,
+                                    wid,
+                                    &mut fast_side,
                                 ));
                                 return;
                             }
@@ -988,7 +1007,7 @@ fn run_pipeline(
                 }
                 worker_ev_shards.lock().unwrap().push(shards);
                 if fast_ref.is_some() {
-                    worker_fast.lock().unwrap().push((wid as usize, fast_buckets, fast_arena));
+                    worker_fast.lock().unwrap().push((wid as usize, fast_buckets, fast_arena, fast_side));
                 }
             });
         }
@@ -1130,9 +1149,12 @@ fn run_pipeline(
     fast_parts.sort_by_key(|w| w.0);
     // Transpose to one list of per-thread row vectors per bucket, so C1 can
     // free a bucket's raw rows as soon as its winners are extracted.
-    let mut by_bucket: Vec<Vec<Vec<FastRec>>> = (0..n_buckets).map(|_| Vec::new()).collect();
+    let mut by_bucket: Vec<Vec<Vec<Rec16>>> = (0..n_buckets).map(|_| Vec::new()).collect();
     let mut fast_workers: Vec<FallbackArena> = Vec::new();
-    for (_, buckets, arena) in fast_parts {
+    let mut fast_sides: Vec<Vec<FastRec>> = Vec::new();
+    for (w, (wid, buckets, arena, side)) in fast_parts.into_iter().enumerate() {
+        assert_eq!(w, wid, "scanning thread indices are dense");
+        fast_sides.push(side);
         for (b, rows) in buckets.into_iter().enumerate() {
             if !rows.is_empty() {
                 by_bucket[b].push(rows);
@@ -1140,7 +1162,8 @@ fn run_pipeline(
         }
         fast_workers.push(arena);
     }
-    let by_bucket: Vec<Mutex<Vec<Vec<FastRec>>>> = by_bucket.into_iter().map(Mutex::new).collect();
+    let by_bucket: Vec<Mutex<Vec<Vec<Rec16>>>> = by_bucket.into_iter().map(Mutex::new).collect();
+    let fast_sides = &fast_sides;
     // Claims first, from every valid row of each bucket (a superset of the
     // winners, so it can only mark more people complex): the alias check and
     // a claim of the bucket, with a small per-bucket filter so each user is
@@ -1161,10 +1184,18 @@ fn run_pipeline(
                         let parts = by_bucket[b].lock().unwrap();
                         for part in parts.iter() {
                             for r in part {
-                                if r.is_invalid() || r.is_opaque() {
+                                if r.is_invalid() {
                                     continue;
                                 }
-                                let u = r.counter();
+                                let u = if r.is_wide() {
+                                    let f = r.full(fast_sides);
+                                    if f.is_opaque() {
+                                        continue;
+                                    }
+                                    f.counter()
+                                } else {
+                                    r.counter()
+                                };
                                 let key = ((b as u64) << 40) | u;
                                 let idx = (((u >> 9) ^ u) & 4095) as usize;
                                 if seen[idx] == key {
@@ -1440,9 +1471,8 @@ fn run_pipeline(
                     let mut runs: Vec<(u32, u32)> = Vec::new();
                     let mut served = 0usize;
                     let mut tsub = [0u128; 5];
-                    let blank = FastRec { key: 0, user: 0, time_price: 0 };
-                    let mut slot = vec![blank; Q];
-                    let mut gen_of = vec![0u32; Q];
+                    let mut slot = vec![Rec16::BLANK; q];
+                    let mut gen_of = vec![0u32; q];
                     let mut stamp = 0u32;
 
                     let mut exact_event = |user: &[u8], ts: i64, price: u32, cat: u32, scratch: &mut FallbackArena| {
@@ -1481,11 +1511,11 @@ fn run_pipeline(
                         for part in &parts {
                             rows += part.len();
                             for r in part {
-                                let s = r.low();
+                                let s = r.low() & (q - 1);
                                 if gen_of[s] != stamp {
                                     gen_of[s] = stamp;
                                     slot[s] = *r;
-                                } else if r.ingest() < slot[s].ingest() {
+                                } else if r.earlier(&slot[s], ingest_base, fast_sides) {
                                     slot[s] = *r;
                                 }
                             }
@@ -1504,29 +1534,50 @@ fn run_pipeline(
                         // bucket where an index falls is regrouped by sorting below.
                         let mut cur_p = u32::MAX;
                         let mut rising = true;
-                        for s in 0..if rows > 0 { Q } else { 0 } {
+                        let plain_cat = catalog.unknown_cat_id;
+                        for s in 0..if rows > 0 { q } else { 0 } {
+                            // Side records sit at random in their lists: fetch ahead.
+                            #[cfg(target_arch = "x86_64")]
+                            if s + SIDE_AHEAD < q {
+                                let n = &slot[s + SIDE_AHEAD];
+                                if n.is_side() && gen_of[s + SIDE_AHEAD] == stamp {
+                                    unsafe {
+                                        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+                                        _mm_prefetch(n.full(fast_sides) as *const FastRec as *const i8, _MM_HINT_T0);
+                                    }
+                                }
+                            }
                             if gen_of[s] != stamp || slot[s].is_invalid() {
                                 continue;
                             }
                             let r = &slot[s];
-                            let ts = window_start + r.ts_off();
-                            if r.is_opaque() {
-                                let (t, off) = r.opaque_ref();
-                                let arena = &fast_workers[t].bytes;
-                                let id = PackedId::from_fallback(off);
-                                let (o, l) = id.fallback_span(arena);
-                                exact_event(&arena[o..o + l], ts, r.price(), r.cat(), &mut scratch);
-                            } else if people.is_complex((r.counter() >> 9) as usize) {
-                                keys.user_id(r.counter(), &mut idbuf);
-                                exact_event(&idbuf, ts, r.price(), r.cat(), &mut scratch);
+                            let (ts_off, price, cat, u) = if r.is_side() {
+                                let f = r.full(fast_sides);
+                                if f.is_opaque() {
+                                    let ts = window_start + f.ts_off();
+                                    let (t, off) = f.opaque_ref();
+                                    let arena = &fast_workers[t].bytes;
+                                    let id = PackedId::from_fallback(off);
+                                    let (o, l) = id.fallback_span(arena);
+                                    exact_event(&arena[o..o + l], ts, f.price(), f.cat(), &mut scratch);
+                                    continue;
+                                }
+                                (f.ts_off(), f.price(), f.cat(), f.counter())
                             } else {
-                                let p = (r.counter() >> 9) as u32;
+                                (r.ts_off(), 0, plain_cat, r.counter())
+                            };
+                            let ts = window_start + ts_off;
+                            if people.is_complex((u >> 9) as usize) {
+                                keys.user_id(u, &mut idbuf);
+                                exact_event(&idbuf, ts, price, cat, &mut scratch);
+                            } else {
+                                let p = (u >> 9) as u32;
                                 if p != cur_p {
                                     rising &= cur_p == u32::MAX || p > cur_p;
                                     runs.push((p, se.len() as u32));
                                     cur_p = p;
                                 }
-                                se.push((ts, r.price(), r.cat()));
+                                se.push((ts, price, cat));
                             }
                         }
                         let q2 = std::time::Instant::now();
@@ -1561,7 +1612,7 @@ fn run_pipeline(
                             let span = hi - lo + 1;
                             sp.clear();
                             se.clear();
-                            if span <= 8 * Q {
+                            if span <= SORT_SPAN {
                                 counts.clear();
                                 counts.resize(span + 1, 0);
                                 for e in &fast_evs {
@@ -1599,7 +1650,7 @@ fn run_pipeline(
                         // a click outside it has no fast event here and goes exact below.
                         scp.clear();
                         sc.clear();
-                        if span <= 8 * Q {
+                        if span <= SORT_SPAN {
                             counts.clear();
                             counts.resize(span + 1, 0);
                             let mut inside = 0usize;
@@ -1949,7 +2000,7 @@ fn run_pipeline(
             }
         );
         eprintln!(
-            "timing_ms: catalog={:.1} fast_prep={:.1} ev_scan_and_links={:.1} classify={:.1} ev_dedup={:.1} fast_dedup={:.1} cl_scan={:.1} click_route={:.1} fast_sessions={:.1} sessions_and_user_write={:.1} cleanup_and_campaign_write={:.1} total={:.1} fast={} fast_people={}",
+            "timing_ms: catalog={:.1} fast_prep={:.1} ev_scan_and_links={:.1} classify={:.1} ev_dedup={:.1} fast_dedup={:.1} cl_scan={:.1} click_route={:.1} fast_sessions={:.1} sessions_and_user_write={:.1} cleanup_and_campaign_write={:.1} total={:.1} fast={} fast_people={} qb={} l2={} siblings={}",
             t_cat.as_secs_f64() * 1000.0,
             (t_fast_prep - t_cat).as_secs_f64() * 1000.0,
             (t_ev_scan - t_fast_prep).as_secs_f64() * 1000.0,
@@ -1967,6 +2018,9 @@ fn run_pipeline(
                 k.event_key, k.user_key, k.event_cap, k.person_cap
             )),
             fast_people.load(AtomicOrdering::Relaxed),
+            qb,
+            l2_bytes.map_or("unknown".to_string(), |b| b.to_string()),
+            siblings as u8,
         );
         #[cfg(target_os = "linux")]
         if let Ok(status) = fs::read_to_string("/proc/self/status") {

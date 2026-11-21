@@ -1,0 +1,1 @@
+Input files: "Read every `*.csv` file in `events/`, `clicks/` and `links/`. ... some that hold only the header." "Every CSV file has a header row."

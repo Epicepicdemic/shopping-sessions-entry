@@ -1,0 +1,1 @@
+Events step 2: "if the kept copy is invalid the event is dropped, and a later valid copy does not rescue it. A malformed copy was already dropped in step 1, so it is never the kept copy."

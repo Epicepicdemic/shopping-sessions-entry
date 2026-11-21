@@ -1,0 +1,1 @@
+CSV dialect: "Only `\n` ends a line: a `\r` is an ordinary character of the field it is in". Strings: "IDs compare exactly, case-sensitive, untrimmed."

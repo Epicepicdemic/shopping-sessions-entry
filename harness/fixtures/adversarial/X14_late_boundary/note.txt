@@ -1,0 +1,1 @@
+Events step 4: "drop the event if `ingest_ts - ts` is over 24 hours. Exactly 24 hours is kept, and so is an `ingest_ts` before `ts`."

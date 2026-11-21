@@ -1,0 +1,1 @@
+CSV dialect: "A line with the wrong number of fields, or with a quote anywhere except around a whole field, is malformed and is dropped." Events step 3: "`price_cents` is ignored whatever it holds" applies only to lines that parsed.

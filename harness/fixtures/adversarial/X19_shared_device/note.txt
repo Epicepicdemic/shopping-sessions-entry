@@ -1,0 +1,1 @@
+Linked IDs step 2: "Every remaining line joins its two IDs into one person, and joining is transitive"; Events step 5: "Sessionize each person's surviving events, all of their IDs together".
