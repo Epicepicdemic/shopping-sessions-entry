@@ -5,6 +5,7 @@ mod compact_links;
 mod fastpath;
 mod id;
 mod io_util;
+mod opaque;
 mod parquet;
 mod parse;
 mod scan;
@@ -818,6 +819,14 @@ fn run_pipeline(
     // Stage 1: products and campaigns (links are built during the event scan)
     let mut catalog = build_catalog(data_dir)?;
     let t_cat = t0.elapsed();
+
+    // The opaque-ID engine first; it returns `None` (having written nothing)
+    // for input outside its limits, and the exact solver below runs instead.
+    if opaque::enabled() {
+        if let Some(result) = opaque::run(&catalog, data_dir, output_dir, ncpu, use_bins, assist_sweep, t0, t_cat) {
+            return result;
+        }
+    }
 
     // Stage 2: Scan events/*.csv. Fast-path rows go to counter buckets; the rest
     // are partitioned by event_id into NUM_SHARDS for the exact solver.
