@@ -91,6 +91,20 @@ fn huge_pages(p: *const u8, bytes: usize) {
     }
 }
 
+/// Map a chunk's pages in one call before scanning it (MADV_POPULATE_READ;
+/// a kernel without it just returns an error).
+fn populate_read(bytes: &[u8], first: usize, stop: usize) {
+    let base = bytes.as_ptr() as usize;
+    let start = (base + first) / 4096 * 4096;
+    let end = (base + stop).div_ceil(4096) * 4096;
+    if end > start {
+        // SAFETY: advice only, inside the mapping.
+        unsafe {
+            madvise(start as *mut core::ffi::c_void, end - start, 22);
+        }
+    }
+}
+
 fn zeroed_u64(n: usize) -> Vec<AtomicU64> {
     let mut v: Vec<u64> = vec![0; n];
     huge_pages(v.as_ptr() as *const u8, n * 8);
@@ -209,31 +223,37 @@ impl Pend {
     }
 }
 
-const DEPTH: usize = 16;
+const RING: usize = 64;
+
+/// Lookups in flight (`SHOPPING_OPQ_DEPTH`, default 16, at most 64).
+fn depth() -> usize {
+    env::var("SHOPPING_OPQ_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(16).clamp(1, RING)
+}
 
 /// FIFO of pending lookups, each with the record it completes.
 struct Ring<T: Copy> {
-    buf: [(Pend, T); DEPTH],
+    buf: [(Pend, T); RING],
     head: usize,
     n: usize,
+    depth: usize,
 }
 
 impl<T: Copy> Ring<T> {
-    fn new(zero: T) -> Self {
+    fn new(zero: T, depth: usize) -> Self {
         let z = Pend { ptr: std::ptr::null(), len: 0, dst: 0, b: 0, key: 0, h: 0 };
-        Self { buf: [(z, zero); DEPTH], head: 0, n: 0 }
+        Self { buf: [(z, zero); RING], head: 0, n: 0, depth }
     }
 
     /// Queue `p`; when full, return the oldest entry for resolution.
     #[inline(always)]
     fn push(&mut self, p: (Pend, T)) -> Option<(Pend, T)> {
-        if self.n == DEPTH {
+        if self.n == self.depth {
             let old = self.buf[self.head];
-            self.buf[self.head] = p;
-            self.head = (self.head + 1) % DEPTH;
+            self.head = (self.head + 1) % RING;
+            self.buf[(self.head + self.n - 1) % RING] = p;
             Some(old)
         } else {
-            self.buf[(self.head + self.n) % DEPTH] = p;
+            self.buf[(self.head + self.n) % RING] = p;
             self.n += 1;
             None
         }
@@ -245,7 +265,7 @@ impl<T: Copy> Ring<T> {
             return None;
         }
         let p = self.buf[self.head];
-        self.head = (self.head + 1) % DEPTH;
+        self.head = (self.head + 1) % RING;
         self.n -= 1;
         Some(p)
     }
@@ -309,6 +329,13 @@ impl Users {
         let h = mix64(key);
         self.prefetch(h);
         Pend { ptr: bytes.as_ptr(), len: bytes.len() as u32, dst, b, key, h }
+    }
+
+    /// `intern_slow` with the key computed here (tests).
+    #[cfg(test)]
+    fn intern(&self, bytes: &[u8], ctx: &mut Ctx) -> u32 {
+        let key = id_key(bytes);
+        self.intern_slow(bytes, key, mix64(key), ctx)
     }
 
     /// The index of an ID with key `key` and hash `h`, inserting it if new;
@@ -682,8 +709,8 @@ pub fn run(
     let click_win_start = window_start - CLICK_LOOKBACK_MS;
     let click_win_end = window_end;
     let out_of_range = AtomicBool::new(false);
-    // Measurement only: 1 = parse events and stop, 2 = no user lookups (wrong output).
-    let diag: u8 = env::var("SHOPPING_OPQ_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let use_pread = env::var("SHOPPING_PREAD").ok().as_deref() == Some("1");
+    let populate = env::var("SHOPPING_POPULATE").ok().as_deref() == Some("1");
 
     // Jobs: links first (their unions overlap the event scan), then events, clicks.
     let mut jobs: Vec<(u8, u32, u64, u64)> = Vec::new();
@@ -713,9 +740,10 @@ pub fn run(
                 let mut dates = DateCache::default();
                 let mut tmp_arena = FallbackArena::new();
                 let mut reader = scan::Reader::default();
-                let mut ring_l: Ring<()> = Ring::new(());
-                let mut ring_e: Ring<ERec> = Ring::new(zero_e);
-                let mut ring_c: Ring<CRec> = Ring::new(zero_c);
+                let d = depth();
+                let mut ring_l: Ring<()> = Ring::new((), d);
+                let mut ring_e: Ring<ERec> = Ring::new(zero_e, d);
+                let mut ring_c: Ring<CRec> = Ring::new(zero_c, d);
                 let mut link_a = INVALID;
                 macro_rules! resolve_link {
                     ($p:expr) => {{
@@ -753,9 +781,17 @@ pub fn run(
                         _ => &click_inputs,
                     };
                     let f = f as usize;
-                    let (bytes, first, stop, mapped) = reader
-                        .load_mapped(&inputs.files[f], inputs.sizes[f], inputs.maps[f].as_slice(), start, end)
-                        .expect("read input");
+                    let (bytes, first, stop, mapped) = if use_pread {
+                        let (b, x, y) = reader.load(&inputs.files[f], inputs.sizes[f], start, end).expect("read input");
+                        (b, x, y, false)
+                    } else {
+                        reader
+                            .load_mapped(&inputs.files[f], inputs.sizes[f], inputs.maps[f].as_slice(), start, end)
+                            .expect("read input")
+                    };
+                    if mapped && populate {
+                        populate_read(bytes, first, stop);
+                    }
                     match kind {
                         0 => {
                             scan::for_each_record::<2>(bytes, first, stop, |rec| {
@@ -776,7 +812,7 @@ pub fn run(
                         1 => scan::for_each_record::<7>(bytes, first, stop, |rec| {
                             let [event_id, user_id, ts_text, ingest_text, event_type, product_id, price_text] =
                                 rec.fields();
-                            if event_id.is_empty() || diag == 1 {
+                            if event_id.is_empty() {
                                 return;
                             }
                             let Some(ingest_ts) = parse_f1_cached(ingest_text, &mut dates) else {
@@ -854,7 +890,7 @@ pub fn run(
                             let b = ebucket(key);
                             let (u, ts_off) = if valid { (0, (ts_val - window_start) as u32) } else { (INVALID, 0) };
                             let r = ERec { key, ingest: ing as u32, u, ts: ts_off, pc: (price_val << 8) | cat_id };
-                            if valid && diag == 0 {
+                            if valid {
                                 if let Some(p) = ring_e.push((users.pend(user_id, 0, b as u32), r)) {
                                     resolve_event!(p);
                                 }
@@ -1373,4 +1409,133 @@ pub fn run(
     std::mem::forget(p_of);
     std::mem::forget(names);
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// IDs inside a buffer with the scanner's 16-byte slack.
+    fn padded(ids: &[&[u8]]) -> (Vec<u8>, Vec<(usize, usize)>) {
+        let mut buf = Vec::new();
+        let mut spans = Vec::new();
+        for id in ids {
+            spans.push((buf.len(), id.len()));
+            buf.extend_from_slice(id);
+            buf.push(b',');
+        }
+        buf.extend_from_slice(&[0u8; 64]);
+        (buf, spans)
+    }
+
+    #[test]
+    fn ring_resolves_in_push_order_at_every_depth() {
+        for depth in [1, 2, 7, 16, 64] {
+            let mut r: Ring<u32> = Ring::new(0, depth);
+            let z = Pend { ptr: std::ptr::null(), len: 0, dst: 0, b: 0, key: 0, h: 0 };
+            let mut out = Vec::new();
+            for i in 0..500u32 {
+                if let Some((_, v)) = r.push((z, i)) {
+                    out.push(v);
+                }
+            }
+            while let Some((_, v)) = r.pop() {
+                out.push(v);
+            }
+            assert_eq!(out, (0..500).collect::<Vec<_>>(), "depth {depth}");
+        }
+    }
+
+    #[test]
+    fn stager_keeps_every_record_in_bucket_order() {
+        let mut st: Stager<ERec, 8> = Stager::new(5, 3, ERec { key: 0, ingest: 0, u: 0, ts: 0, pc: 0 });
+        let mut want: Vec<Vec<u64>> = vec![Vec::new(); 5];
+        let mut x = 88172645463325252u64;
+        for i in 0..10_000u64 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let b = (x % 5) as usize;
+            st.push(b, ERec { key: i + 1, ingest: 0, u: 0, ts: 0, pc: 0 });
+            want[b].push(i + 1);
+        }
+        let got = st.finish();
+        for b in 0..5 {
+            assert_eq!(got[b].iter().map(|r| r.key).collect::<Vec<_>>(), want[b]);
+        }
+        std::mem::forget(got);
+    }
+
+    #[test]
+    fn interning_is_exact_for_short_long_and_colliding_ids() {
+        let users = Users::new(1 << 16, 2, 1 << 20);
+        let mut ctx = users.ctx(0);
+        let ids: Vec<&[u8]> = vec![
+            b"u1", b"U1", b"u1 ", b" u1", b"u02423c3d84ab053af78764ce49f23b5c", b"u02423c3d84ab053af78764ce49f23b5d",
+            "é".as_bytes(), b"0123456789", b"01234567890", b"a_b", b"a-b",
+        ];
+        let (buf, spans) = padded(&ids);
+        let at = |i: usize| &buf[spans[i].0..spans[i].0 + spans[i].1];
+        let first: Vec<u32> = (0..ids.len()).map(|i| users.intern(at(i), &mut ctx)).collect();
+        let mut sorted = first.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "distinct IDs get distinct indices");
+        for i in 0..ids.len() {
+            assert_eq!(users.intern(at(i), &mut ctx), first[i], "the same ID maps to the same index");
+            let mut b = [0u8; 10];
+            assert_eq!(users.id_bytes(first[i], &mut b), ids[i]);
+        }
+        // Two different long IDs forced onto one key and hash: bytes decide.
+        let (a, b) = (at(4), at(5));
+        let k = LONG | 12345;
+        let ua = users.intern_slow(a, k, 99, &mut ctx);
+        let ub = users.intern_slow(b, k, 99, &mut ctx);
+        assert_ne!(ua, ub);
+        assert_eq!(users.intern_slow(a, k, 99, &mut ctx), ua);
+        assert_eq!(users.intern_slow(b, k, 99, &mut ctx), ub);
+        // Byte order across packed and long forms.
+        for i in 0..ids.len() {
+            for j in 0..ids.len() {
+                assert_eq!(users.id_less(first[i], first[j]), ids[i] < ids[j], "{:?} {:?}", ids[i], ids[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn union_find_joins_transitively_from_any_thread() {
+        let users = Users::new(1 << 16, 4, 1 << 20);
+        let names: Vec<Vec<u8>> = (0..2000).map(|i| format!("id{i}").into_bytes()).collect();
+        let refs: Vec<&[u8]> = names.iter().map(|v| v.as_slice()).collect();
+        let (buf, spans) = padded(&refs);
+        let ix: Vec<u32> = {
+            let mut ctx = users.ctx(0);
+            (0..names.len()).map(|i| users.intern(&buf[spans[i].0..spans[i].0 + spans[i].1], &mut ctx)).collect()
+        };
+        // Chains i -> i+10 within each residue class mod 10, joined in parallel.
+        thread::scope(|s| {
+            for t in 0..4 {
+                let (users, ix) = (&users, &ix);
+                s.spawn(move || {
+                    for i in (t..1990).step_by(4) {
+                        users.union(ix[i], ix[i + 10]);
+                    }
+                });
+            }
+        });
+        for i in 0..2000 {
+            for j in [i % 10, (i + 1) % 10] {
+                assert_eq!(users.find(ix[i]) == users.find(ix[j]), i % 10 == j % 10);
+            }
+        }
+    }
+
+    #[test]
+    fn key_set_finds_exactly_its_keys() {
+        let keys: Vec<u64> = (1..5000u64).map(|i| mix64(i) | 1).collect();
+        let set = KeySet::new(&keys[..2500]);
+        for (i, &k) in keys.iter().enumerate() {
+            assert_eq!(set.contains(k), i < 2500);
+        }
+    }
 }

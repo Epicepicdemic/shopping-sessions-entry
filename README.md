@@ -10,9 +10,19 @@ A click-stream sessionisation pipeline for the Shopping Sessions track. Entry fo
 
 The generated data sets are not in the repository.
 
-## The generator, and what the fast path relies on
+## The default run: the opaque-ID engine
 
-The fast path is off by default. The v5 data passes every ID through a keyed bijection and gives one in eight IDs a 32-character hexadecimal suffix, so the decoding below no longer applies, and the default run is the exact solver alone. `SHOPPING_FAST=1` turns the fast path on for data from the earlier generator.
+The default run is `fast/src/opaque.rs`. It treats every ID as an opaque string and implements the rules for any IDs; it uses nothing about how the generator makes them.
+
+- **IDs.** An ID of at most ten characters from `[0-9A-Z_a-z]` is keyed by its exact 60-bit packed form. Any other ID is keyed by a 64-bit hash, and its bytes are compared whenever two keys match, so two different IDs never merge.
+- **One pass over all input.** Links, events and clicks are read in parallel. Each user ID is interned into a dense index in a lock-free table; each link line joins its two indices in a concurrent union-find. Each event copy is filed under a bucket of its event key with its ingest time, user index and validated fields; each valid click is kept with its user index.
+- **Persons.** Each link component is a person named by its byte-wise smallest ID; every other ID is a person of its own.
+- **Dedup, then sessions.** Each event bucket keeps, per event ID, the copy with the smallest ingest time (dedup before validation), and files the surviving valid events by person. Each person bucket is then sessionized by the same code the exact solver uses (`fast/src/sink.rs`).
+- **Limits.** Input outside the engine's limits (table capacity, a window longer than 49 days, more than 256 categories, an ingest time more than 68 years from the window, or two different long event IDs with the same key) makes it stop before writing anything, and the exact solver runs instead. `SHOPPING_OPAQUE=0` runs the exact solver alone.
+
+## The generator, and the older fast path
+
+The older fast path is off by default and only runs with `SHOPPING_FAST=1`. The v5 data passes every ID through a keyed bijection and gives one in eight IDs a 32-character hexadecimal suffix, so the decoding below does not apply to it.
 
 We used the organisers' dataset generator (`generator.zip`, Rust; not included here) to make test data, and we read its source. The fast path is built on its ID encoding:
 
@@ -54,7 +64,11 @@ Switches, for measurement:
 | Switch | Effect |
 |---|---|
 | `SHOPPING_TIMING=1` | Logs stage times, the build and bucket width chosen, and peak RSS to stderr. |
-| `SHOPPING_FAST=1` | Turns on the fast path (data from the earlier generator only). The default is the exact solver alone. |
+| `SHOPPING_OPAQUE=0` | Runs the exact solver alone instead of the opaque-ID engine. |
+| `SHOPPING_FAST=1` | With `SHOPPING_OPAQUE=0`, turns on the older fast path (data from the earlier generator only). |
+| `SHOPPING_HUGE=0` | No transparent huge pages for the opaque engine's tables. |
+| `SHOPPING_OPQ_DEPTH=1`..`64` | User-table lookups in flight per scan thread (default 16). |
+| `SHOPPING_POPULATE=1` | Maps each input range in one call before scanning it (opaque engine). |
 | `SHOPPING_COMPACT_LINKS=0` | Builds the full exact link graph instead of the compact one (fast path only). |
 | `SHOPPING_BUILD=portable` or `v4` | Forces a build. The default is v3 when the CPU has it. |
 | `SHOPPING_QB=13`..`16` | Forces the bucket width. The default comes from the CPU's L2 size. |
