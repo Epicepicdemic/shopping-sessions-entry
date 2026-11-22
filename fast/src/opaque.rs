@@ -121,6 +121,26 @@ fn populate_read(bytes: &[u8], first: usize, stop: usize) {
     }
 }
 
+/// Give a consumed buffer's whole pages back to the kernel now, from the
+/// thread that consumed it, instead of all at exit (`SHOPPING_DISCARD=0`
+/// keeps them). Nothing reads the buffer afterwards, and it is never dropped.
+fn discard<T>(v: &[T], cap: usize) {
+    if !DISCARD.load(Ordering::Relaxed) {
+        return;
+    }
+    let bytes = cap * std::mem::size_of::<T>();
+    let start = (v.as_ptr() as usize).div_ceil(4096) * 4096;
+    let end = (v.as_ptr() as usize + bytes) / 4096 * 4096;
+    if end > start {
+        // SAFETY: whole pages inside the buffer's own allocation, unused from here on.
+        unsafe {
+            madvise(start as *mut core::ffi::c_void, end - start, 4); // MADV_DONTNEED
+        }
+    }
+}
+
+static DISCARD: AtomicBool = AtomicBool::new(true);
+
 fn zeroed_u64(n: usize) -> Vec<AtomicU64> {
     let mut v: Vec<u64> = vec![0; n];
     huge_pages(v.as_ptr() as *const u8, n * 8);
@@ -689,6 +709,7 @@ pub fn run(
     t_cat: std::time::Duration,
 ) -> Option<io::Result<()>> {
     COLLIDE.store(env::var("SHOPPING_OPQ_COLLIDE").ok().as_deref() == Some("1"), Ordering::Relaxed);
+    DISCARD.store(env::var("SHOPPING_DISCARD").ok().as_deref() != Some("0"), Ordering::Relaxed);
     let window_start = catalog.window_start;
     let window_end = catalog.window_end;
     if window_end.saturating_sub(window_start) > u32::MAX as i64 || catalog.categories.len() > 256 {
@@ -1205,6 +1226,10 @@ pub fn run(
                             pstage.push((p >> pbits) as usize, PRec { p, ts: r.ts, pc: r.pc });
                         }
                     }
+                    for o in outs.iter() {
+                        discard(&o.ebuckets[b], o.ebuckets[b].capacity());
+                        discard(&o.lbuckets[b], o.lbuckets[b].capacity());
+                    }
                 }
                 let pbuckets = std::mem::ManuallyDrop::new(pstage.finish());
                 dedup_out.lock().unwrap().push(pbuckets);
@@ -1360,6 +1385,12 @@ pub fn run(
                         sink.person(name, &mut evs[es..ee], &mut cls[cs..ce], &local.bytes, false);
                     }
                     t_sink += tm.elapsed().as_secs_f64();
+                    for v in dedup_out {
+                        discard(&v[pb], v[pb].capacity());
+                    }
+                    for part in click_parts {
+                        discard(&part[pb], part[pb].capacity());
+                    }
                 }
                 let tw = Instant::now();
                 let ucols = &sink.ucols;
@@ -1462,6 +1493,11 @@ pub fn run(
             pbits,
             slots,
         );
+    }
+    if timing() {
+        let st = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let hwm = st.lines().find(|l| l.starts_with("VmHWM")).unwrap_or("VmHWM: ?");
+        eprintln!("peak_rss: {}", hwm.trim_start_matches("VmHWM:").trim());
     }
     std::mem::forget(dedup_out);
     std::mem::forget(click_parts);
