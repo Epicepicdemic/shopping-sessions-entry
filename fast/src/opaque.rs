@@ -211,22 +211,22 @@ impl Pend {
 
 const DEPTH: usize = 16;
 
-/// FIFO of pending lookups.
-struct Ring {
-    buf: [Pend; DEPTH],
+/// FIFO of pending lookups, each with the record it completes.
+struct Ring<T: Copy> {
+    buf: [(Pend, T); DEPTH],
     head: usize,
     n: usize,
 }
 
-impl Ring {
-    fn new() -> Self {
+impl<T: Copy> Ring<T> {
+    fn new(zero: T) -> Self {
         let z = Pend { ptr: std::ptr::null(), len: 0, dst: 0, b: 0, key: 0, h: 0 };
-        Self { buf: [z; DEPTH], head: 0, n: 0 }
+        Self { buf: [(z, zero); DEPTH], head: 0, n: 0 }
     }
 
     /// Queue `p`; when full, return the oldest entry for resolution.
     #[inline(always)]
-    fn push(&mut self, p: Pend) -> Option<Pend> {
+    fn push(&mut self, p: (Pend, T)) -> Option<(Pend, T)> {
         if self.n == DEPTH {
             let old = self.buf[self.head];
             self.buf[self.head] = p;
@@ -240,7 +240,7 @@ impl Ring {
     }
 
     #[inline(always)]
-    fn pop(&mut self) -> Option<Pend> {
+    fn pop(&mut self) -> Option<(Pend, T)> {
         if self.n == 0 {
             return None;
         }
@@ -441,6 +441,123 @@ impl Users {
     }
 }
 
+/// `N` records filling whole cache lines.
+#[repr(C, align(64))]
+#[derive(Clone, Copy)]
+struct Group<T: Copy, const N: usize>([T; N]);
+
+/// Per-bucket staging: records gather in one group per bucket (cache
+/// resident) and reach the bucket's span a whole group at a time through
+/// non-temporal stores, so the scattered writes never read memory first.
+struct Stager<T: Copy, const N: usize> {
+    stage: Vec<Group<T, N>>,
+    fill: Vec<u8>,
+    spans: Vec<Vec<Group<T, N>>>,
+}
+
+impl<T: Copy, const N: usize> Stager<T, N> {
+    const WHOLE_LINES: () = assert!(std::mem::size_of::<Group<T, N>>() == N * std::mem::size_of::<T>()
+        && std::mem::size_of::<Group<T, N>>() % 64 == 0 && N < 256);
+
+    fn new(buckets: usize, reserve_records: usize, zero: T) -> Self {
+        let () = Self::WHOLE_LINES;
+        Self {
+            stage: vec![Group([zero; N]); buckets],
+            fill: vec![0; buckets],
+            spans: (0..buckets).map(|_| Vec::with_capacity(reserve_records.div_ceil(N))).collect(),
+        }
+    }
+
+    #[inline(always)]
+    fn push(&mut self, b: usize, r: T) {
+        let f = self.fill[b] as usize;
+        self.stage[b].0[f] = r;
+        if f + 1 == N {
+            self.flush(b);
+        } else {
+            self.fill[b] = (f + 1) as u8;
+        }
+    }
+
+    #[inline]
+    fn flush(&mut self, b: usize) {
+        let span = &mut self.spans[b];
+        if span.len() == span.capacity() {
+            span.reserve(span.capacity().max(16));
+        }
+        // SAFETY: spare capacity of a 64-byte aligned buffer; whole group.
+        unsafe {
+            store_group(span.as_mut_ptr().add(span.len()) as *mut u8, &self.stage[b] as *const _ as *const u8,
+                std::mem::size_of::<Group<T, N>>());
+            span.set_len(span.len() + 1);
+        }
+        self.fill[b] = 0;
+    }
+
+    /// Every bucket's records in push order. The buffers are never freed
+    /// (they keep their 64-byte alignment); callers forget them.
+    fn finish(self) -> Vec<Vec<T>> {
+        store_fence();
+        let Self { stage, fill, spans } = self;
+        spans
+            .into_iter()
+            .enumerate()
+            .map(|(b, mut span)| {
+                let f = fill[b] as usize;
+                if f > 0 && span.len() == span.capacity() {
+                    span.reserve(1);
+                }
+                let (p, len, cap) = (span.as_mut_ptr(), span.len(), span.capacity());
+                std::mem::forget(span);
+                // SAFETY: groups are `N` contiguous records; the partial group
+                // goes to spare capacity.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(stage[b].0.as_ptr(), (p as *mut T).add(len * N), f);
+                    Vec::from_raw_parts(p as *mut T, len * N + f, cap * N)
+                }
+            })
+            .collect()
+    }
+}
+
+#[inline(always)]
+unsafe fn store_group(dst: *mut u8, src: *const u8, bytes: usize) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
+    // SAFETY: both 32-byte aligned (groups are 64-byte aligned), `bytes` % 32 == 0.
+    unsafe {
+        use std::arch::x86_64::{__m256i, _mm256_load_si256, _mm256_stream_si256};
+        for k in 0..bytes / 32 {
+            _mm256_stream_si256((dst as *mut __m256i).add(k), _mm256_load_si256((src as *const __m256i).add(k)));
+        }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx")))]
+    // SAFETY: as above.
+    unsafe {
+        std::ptr::copy_nonoverlapping(src, dst, bytes);
+    }
+}
+
+#[inline(always)]
+fn store_fence() {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a fence.
+    unsafe {
+        std::arch::x86_64::_mm_sfence();
+    }
+}
+
+#[inline(always)]
+fn prefetch_ptr<T>(p: *const T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch.
+    unsafe {
+        use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+        _mm_prefetch(p as *const i8, _MM_HINT_T0);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = p;
+}
+
 /// One event copy in its event bucket (24 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -512,7 +629,8 @@ impl KeySet {
 }
 
 struct ScanOut {
-    ebuckets: Vec<Vec<ERec>>,
+    /// Filled from a `Stager` (64-byte aligned buffers): never dropped.
+    ebuckets: std::mem::ManuallyDrop<Vec<Vec<ERec>>>,
     long_events: Vec<(u64, u64)>,
     ev_arena: FallbackArena,
     clicks: Vec<CRec>,
@@ -564,6 +682,8 @@ pub fn run(
     let click_win_start = window_start - CLICK_LOOKBACK_MS;
     let click_win_end = window_end;
     let out_of_range = AtomicBool::new(false);
+    // Measurement only: 1 = parse events and stop, 2 = no user lookups (wrong output).
+    let diag: u8 = env::var("SHOPPING_OPQ_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
 
     // Jobs: links first (their unions overlap the event scan), then events, clicks.
     let mut jobs: Vec<(u8, u32, u64, u64)> = Vec::new();
@@ -580,8 +700,11 @@ pub fn run(
             scope.spawn(|| {
                 let wid = next_wid.fetch_add(1, Ordering::Relaxed);
                 let mut ctx = users.ctx(wid);
+                let zero_e = ERec { key: 0, ingest: 0, u: 0, ts: 0, pc: 0 };
+                let zero_c = CRec { ts: 0, cid: 0, u: 0, camp: 0 };
+                let mut stager: Stager<ERec, 8> = Stager::new(n_eb, reserve, zero_e);
                 let mut out = ScanOut {
-                    ebuckets: (0..n_eb).map(|_| Vec::with_capacity(reserve)).collect(),
+                    ebuckets: std::mem::ManuallyDrop::new(Vec::new()),
                     long_events: Vec::new(),
                     ev_arena: FallbackArena::new(),
                     clicks: Vec::new(),
@@ -590,11 +713,13 @@ pub fn run(
                 let mut dates = DateCache::default();
                 let mut tmp_arena = FallbackArena::new();
                 let mut reader = scan::Reader::default();
-                let mut ring = Ring::new();
+                let mut ring_l: Ring<()> = Ring::new(());
+                let mut ring_e: Ring<ERec> = Ring::new(zero_e);
+                let mut ring_c: Ring<CRec> = Ring::new(zero_c);
                 let mut link_a = INVALID;
                 macro_rules! resolve_link {
                     ($p:expr) => {{
-                        let p = $p;
+                        let (p, ()) = $p;
                         let u = users.intern_slow(p.bytes(), p.key, p.h, &mut ctx);
                         if p.dst == 0 {
                             link_a = u;
@@ -605,16 +730,16 @@ pub fn run(
                 }
                 macro_rules! resolve_event {
                     ($p:expr) => {{
-                        let p = $p;
-                        let u = users.intern_slow(p.bytes(), p.key, p.h, &mut ctx);
-                        out.ebuckets[p.b as usize][p.dst as usize].u = u;
+                        let (p, mut r) = $p;
+                        r.u = users.intern_slow(p.bytes(), p.key, p.h, &mut ctx);
+                        stager.push(p.b as usize, r);
                     }};
                 }
                 macro_rules! resolve_click {
                     ($p:expr) => {{
-                        let p = $p;
-                        let u = users.intern_slow(p.bytes(), p.key, p.h, &mut ctx);
-                        out.clicks[p.dst as usize].u = u;
+                        let (p, mut c) = $p;
+                        c.u = users.intern_slow(p.bytes(), p.key, p.h, &mut ctx);
+                        out.clicks.push(c);
                     }};
                 }
                 loop {
@@ -639,19 +764,19 @@ pub fn run(
                                     return;
                                 }
                                 for (x, side) in [(a, 0), (b, 1)] {
-                                    if let Some(p) = ring.push(users.pend(x, side, 0)) {
+                                    if let Some(p) = ring_l.push((users.pend(x, side, 0), ())) {
                                         resolve_link!(p);
                                     }
                                 }
                             });
-                            while let Some(p) = ring.pop() {
+                            while let Some(p) = ring_l.pop() {
                                 resolve_link!(p);
                             }
                         }
                         1 => scan::for_each_record::<7>(bytes, first, stop, |rec| {
                             let [event_id, user_id, ts_text, ingest_text, event_type, product_id, price_text] =
                                 rec.fields();
-                            if event_id.is_empty() {
+                            if event_id.is_empty() || diag == 1 {
                                 return;
                             }
                             let Some(ingest_ts) = parse_f1_cached(ingest_text, &mut dates) else {
@@ -728,18 +853,13 @@ pub fn run(
                             }
                             let b = ebucket(key);
                             let (u, ts_off) = if valid { (0, (ts_val - window_start) as u32) } else { (INVALID, 0) };
-                            let i = out.ebuckets[b].len() as u32;
-                            out.ebuckets[b].push(ERec {
-                                key,
-                                ingest: ing as u32,
-                                u,
-                                ts: ts_off,
-                                pc: (price_val << 8) | cat_id,
-                            });
-                            if valid {
-                                if let Some(p) = ring.push(users.pend(user_id, i, b as u32)) {
+                            let r = ERec { key, ingest: ing as u32, u, ts: ts_off, pc: (price_val << 8) | cat_id };
+                            if valid && diag == 0 {
+                                if let Some(p) = ring_e.push((users.pend(user_id, 0, b as u32), r)) {
                                     resolve_event!(p);
                                 }
+                            } else {
+                                stager.push(b, r);
                             }
                         }),
                         _ => scan::for_each_record::<4>(bytes, first, stop, |rec| {
@@ -774,24 +894,23 @@ pub fn run(
                                     FALLBACK | ((wid as u64) << 40) | off
                                 }
                             };
-                            let i = out.clicks.len() as u32;
-                            out.clicks.push(CRec { ts, cid, u: 0, camp: camp_idx });
-                            if let Some(p) = ring.push(users.pend(user_id, i, 0)) {
+                            let c = CRec { ts, cid, u: 0, camp: camp_idx };
+                            if let Some(p) = ring_c.push((users.pend(user_id, 0, 0), c)) {
                                 resolve_click!(p);
                             }
                         }),
                     }
-                    while let Some(p) = ring.pop() {
-                        if kind == 1 {
-                            resolve_event!(p);
-                        } else {
-                            resolve_click!(p);
-                        }
+                    while let Some(p) = ring_e.pop() {
+                        resolve_event!(p);
+                    }
+                    while let Some(p) = ring_c.pop() {
+                        resolve_click!(p);
                     }
                     if mapped {
                         scan::unmap_pages(bytes, first, stop);
                     }
                 }
+                out.ebuckets = std::mem::ManuallyDrop::new(stager.finish());
                 outs.lock().unwrap().push((wid, out));
             });
         }
@@ -897,7 +1016,8 @@ pub fn run(
     let pbits = ((PERSON_TARGET / per_person).max(1).next_power_of_two().trailing_zeros()).min(20);
     let n_pb = (n_persons >> pbits) + 1;
     let next_eb = AtomicUsize::new(0);
-    let dedup_out: Mutex<Vec<(Vec<Vec<PRec>>, Vec<u64>)>> = Mutex::new(Vec::with_capacity(workers));
+    let dedup_out: Mutex<Vec<(std::mem::ManuallyDrop<Vec<Vec<PRec>>>, Vec<u64>)>> =
+        Mutex::new(Vec::with_capacity(workers));
     let max_bucket = (0..n_eb).map(|b| outs.iter().map(|o| o.ebuckets[b].len()).sum::<usize>()).max().unwrap_or(0);
     thread::scope(|scope| {
         for _ in 0..workers {
@@ -905,19 +1025,17 @@ pub fn run(
             scope.spawn(move || {
                 let tsize = (max_bucket * 2).next_power_of_two().max(16);
                 let tmask = tsize - 1;
-                // (key, record index, stamp)
+                // (key, record index, ingest); key 0 = empty (keys are never 0)
                 let mut table: Vec<(u64, u32, u32)> = vec![(0, 0, 0); tsize];
                 let mut occupied: Vec<u32> = Vec::with_capacity(max_bucket);
-                let mut stamp = 0u32;
                 let per_pb = n_records / n_pb.max(1) / workers.max(1) * 5 / 4 + 16;
-                let mut pbuckets: Vec<Vec<PRec>> = (0..n_pb).map(|_| Vec::with_capacity(per_pb)).collect();
+                let mut pstage: Stager<PRec, 16> = Stager::new(n_pb, per_pb, PRec { p: 0, ts: 0, pc: 0 });
                 let mut verify: Vec<u64> = Vec::new();
                 loop {
                     let b = next_eb.fetch_add(1, Ordering::Relaxed);
                     if b >= n_eb {
                         break;
                     }
-                    stamp += 1;
                     occupied.clear();
                     for (w, o) in outs.iter().enumerate() {
                         for (i, r) in o.ebuckets[b].iter().enumerate() {
@@ -925,8 +1043,8 @@ pub fn run(
                             let mut s = (mix64(r.key) as usize) & tmask;
                             loop {
                                 let e = &mut table[s];
-                                if e.2 != stamp {
-                                    *e = (r.key, idx, stamp);
+                                if e.0 == 0 {
+                                    *e = (r.key, idx, r.ingest);
                                     occupied.push(s as u32);
                                     break;
                                 }
@@ -934,9 +1052,9 @@ pub fn run(
                                     if r.key & LONG != 0 {
                                         verify.push(r.key);
                                     }
-                                    let cur = &outs[(e.1 >> 26) as usize].ebuckets[b][(e.1 & ((1 << 26) - 1)) as usize];
-                                    if r.ingest < cur.ingest {
+                                    if r.ingest < e.2 {
                                         e.1 = idx;
+                                        e.2 = r.ingest;
                                     }
                                     break;
                                 }
@@ -944,15 +1062,25 @@ pub fn run(
                             }
                         }
                     }
-                    for &s in &occupied {
-                        let idx = table[s as usize].1;
-                        let r = &outs[(idx >> 26) as usize].ebuckets[b][(idx & ((1 << 26) - 1)) as usize];
+                    let rec = |idx: u32| &outs[(idx >> 26) as usize].ebuckets[b][(idx & ((1 << 26) - 1)) as usize];
+                    const AHEAD: usize = 12;
+                    for k in 0..occupied.len() {
+                        if let Some(&s2) = occupied.get(k + AHEAD) {
+                            let r2 = rec(table[s2 as usize].1);
+                            if r2.u != INVALID {
+                                prefetch_ptr(&p_of[r2.u as usize]);
+                            }
+                        }
+                        let e = &mut table[occupied[k] as usize];
+                        let r = rec(e.1);
+                        e.0 = 0;
                         if r.u != INVALID {
                             let p = p_of[r.u as usize].load(Ordering::Relaxed);
-                            pbuckets[(p >> pbits) as usize].push(PRec { p, ts: r.ts, pc: r.pc });
+                            pstage.push((p >> pbits) as usize, PRec { p, ts: r.ts, pc: r.pc });
                         }
                     }
                 }
+                let pbuckets = std::mem::ManuallyDrop::new(pstage.finish());
                 dedup_out.lock().unwrap().push((pbuckets, verify));
             });
         }
@@ -1005,7 +1133,10 @@ pub fn run(
                 let p_of = &p_of;
                 scope.spawn(move || {
                     let mut cb: Vec<Vec<CRec>> = (0..n_pb).map(|_| Vec::new()).collect();
-                    for c in &o.clicks {
+                    for (k, c) in o.clicks.iter().enumerate() {
+                        if let Some(c2) = o.clicks.get(k + 16) {
+                            prefetch_ptr(&p_of[c2.u as usize]);
+                        }
                         let p = p_of[c.u as usize].load(Ordering::Relaxed);
                         cb[(p >> pbits) as usize].push(CRec { u: p, ..*c });
                     }
@@ -1217,7 +1348,7 @@ pub fn run(
     if timing() {
         let ms = |a: std::time::Duration, b: std::time::Duration| (b - a).as_secs_f64() * 1000.0;
         eprintln!(
-            "timing_ms: catalog={:.1} opaque_scan={:.1} persons={:.1} ev_dedup={:.1} verify={:.1} click_route={:.1} sessions_and_user_write={:.1} campaign_write={:.1} total={:.1} opaque=1 users={} persons={} buckets={}x{} pbits={} slots={}",
+            "timing_ms: catalog={:.1} opaque_scan={:.1} persons_ms={:.1} ev_dedup={:.1} verify={:.1} click_route={:.1} sessions_and_user_write={:.1} campaign_write={:.1} total={:.1} opaque=1 users={} people={} buckets={}x{} pbits={} slots={}",
             t_cat.as_secs_f64() * 1000.0,
             ms(t_cat, t_scan),
             ms(t_scan, t_persons),
