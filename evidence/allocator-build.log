@@ -1,0 +1,36 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.17kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 131B done
+#3 DONE 0.0s
+
+#4 [allocator 1/2] ADD --checksum=sha256:8e0ed89907a681276bff2e49e9a048b47ba51254ab60daf6b3c220acac456a95     https://codeload.github.com/microsoft/mimalloc/tar.gz/refs/tags/v2.2.7 /tmp/mimalloc.tar.gz
+#4 DONE 0.0s
+
+#5 [toolchain 1/2] FROM docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
+#5 resolve docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 done
+#5 DONE 0.0s
+
+#6 [allocator 1/2] ADD --checksum=sha256:8e0ed89907a681276bff2e49e9a048b47ba51254ab60daf6b3c220acac456a95     https://codeload.github.com/microsoft/mimalloc/tar.gz/refs/tags/v2.2.7 /tmp/mimalloc.tar.gz
+#6 CACHED
+
+#7 [toolchain 2/2] RUN apk add --no-cache build-base=0.5-r3 gcc=15.2.0-r2 g++=15.2.0-r2 musl-dev=1.2.5-r24 binutils=2.45.1-r0
+#7 CACHED
+
+#8 [allocator 2/2] RUN mkdir /mimalloc && tar -xzf /tmp/mimalloc.tar.gz --strip-components=1 -C /mimalloc     && gcc -O3 -DNDEBUG -march=x86-64-v2 -DMI_STATIC_LIB -DMI_MALLOC_OVERRIDE -DMI_LIBC_MUSL=1        -fno-builtin-malloc -ftls-model=local-dynamic -pthread -I/mimalloc/include -I/mimalloc/src        -c /mimalloc/src/static.c -o /mimalloc.o
+#8 CACHED
+
+#9 exporting to image
+#9 exporting layers
+#9 exporting layers 4.9s done
+#9 exporting manifest sha256:f757adc1e97b3194246bf57f9f7127ef4dd7110a411cc6a61186ef4898cc4ef6 done
+#9 exporting config sha256:8af447171ca38261cf7d5592078722d0125d94dbe1908b7a241cdc0e9789324f done
+#9 naming to docker.io/library/shopping-w5:allocator done
+#9 DONE 4.9s

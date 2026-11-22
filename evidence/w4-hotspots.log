@@ -1,0 +1,109 @@
+All samples with Wave-4 on stack
+  379 libsystem_kernel.dylib pread :
+  207 w4-native add<w3::Engine<w3::Atom>::Worker, std::__1::vector<std::__1::unique_ptr<w3::Engine<w3::Atom>::Worker, std main.cpp:244
+  117 w4-native w3::Dates::millis(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const input.hpp:929
+  110 w4-native operator() main.cpp:585
+  101 w4-native allocate radix.hpp:74
+   97 w4-native <deduplicated_symbol> :
+   96 w4-native validate main.cpp:356
+   90 w4-native auto w3::Engine<w3::Atom>::scan_events(unsigned int, w3::Engine<w3::Atom>::Worker&, w3::Part const&)::'la main.cpp:510
+   90 w4-native w3::Names::intern(w3::Id, unsigned int, w3::Keys const&) main.cpp:0
+   80 w4-native split_fields<true, 7UL> input.hpp:641
+   60 w4-native w3::Keys::put(unsigned int, std::__1::basic_string_view<char, std::__1::char_traits<char>>, unsigned long keys.hpp:197
+   53 w4-native w3::Bins<w3::EventRef, 4096ul>::allocate() radix.hpp:74
+   51 w4-native operator() input.hpp:418
+   47 w4-native scan_batch<true, 7UL, (lambda at proto/src/main.cpp:493:53)> input.hpp:687
+   46 libsystem_platform.dylib _platform_memmove :
+   45 w4-native operator() main.cpp:627
+   44 w4-native sort_events<w3::Atom> main.cpp:276
+   42 w4-native add_index radix.hpp:105
+   42 w4-native empty string_view:412
+   41 w4-native field<true, false> input.hpp:595
+   40 w4-native iso_seconds input.hpp:894
+   40 w4-native literal_hash keys.hpp:17
+   37 w4-native operator() input.hpp:419
+   35 w4-native add aggregate.hpp:105
+   34 w4-native w3::Reduce<unsigned int>::credit_many(std::__1::span<w3::AdClick<unsigned int> const, 1844674407370955161 aggregate.hpp:246
+   33 w4-native iso_seconds input.hpp:880
+Event scan leaf samples
+  317 libsystem_kernel.dylib pread :
+   96 w4-native validate main.cpp:356
+   90 w4-native auto w3::Engine<w3::Atom>::scan_events(unsigned int, w3::Engine<w3::Atom>::Worker&, w3::Part const&)::'la main.cpp:510
+   84 w4-native w3::Dates::millis(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const input.hpp:929
+   80 w4-native split_fields<true, 7UL> input.hpp:641
+   72 w4-native allocate radix.hpp:74
+   58 w4-native w3::Keys::put(unsigned int, std::__1::basic_string_view<char, std::__1::char_traits<char>>, unsigned long keys.hpp:197
+   53 w4-native w3::Bins<w3::EventRef, 4096ul>::allocate() radix.hpp:74
+   47 w4-native scan_batch<true, 7UL, (lambda at proto/src/main.cpp:493:53)> input.hpp:687
+   42 w4-native add_index radix.hpp:105
+   41 w4-native field<true, false> input.hpp:595
+   40 w4-native operator() input.hpp:418
+   39 w4-native empty string_view:412
+   34 w4-native operator() input.hpp:419
+   32 w4-native iso_seconds input.hpp:894
+   29 w4-native ingest_seconds input.hpp:909
+   29 w4-native row_mask<&w3::Masks::commas> input.hpp:0
+   27 w4-native literal_hash keys.hpp:17
+   27 w4-native bool w3::quote_boundaries<&w3::parity_neon(unsigned long long)>(w3::Masks const*, unsigned long) input.hpp:513
+   26 w4-native __countr_zero<unsigned long long> countr.h:27
+   23 w4-native load<unsigned long long> input.hpp:87
+   22 w4-native iso_seconds input.hpp:880
+   22 w4-native w3::Earliest::store(long long, w3::Buy, std::__1::vector<w3::EventExtra, std::__1::allocator<w3::EventExt main.cpp:214
+   22 w4-native void w3::scan_batch<true, 7ul, w3::Engine<w3::Atom>::scan_events(unsigned int, w3::Engine<w3::Atom>::Work input.hpp:0
+   20 w4-native basic_string_view string_view:316
+   20 w4-native literal_id keys.hpp:72
+Exact Wave-4 text offsets (arm64)
+   71 0x150d8 radix.hpp:74 allocate
+   71 0x1c000 main.cpp:585 operator()
+   62 0x15c84 input.hpp:929 w3::Dates::millis(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+   62 0x1945c main.cpp:244 add<w3::Engine<w3::Atom>::Worker, std::__1::vector<std::__1::unique_ptr<w3::Engine<w3::Atom>::Worker, std
+   52 0x162bc radix.hpp:74 w3::Bins<w3::EventRef, 4096ul>::allocate()
+   46 0x19234 main.cpp:244 add<w3::Engine<w3::Atom>::Worker, std::__1::vector<std::__1::unique_ptr<w3::Engine<w3::Atom>::Worker, std
+   39 0x14ffc radix.hpp:105 add_index
+   33 0x13f6c input.hpp:687 scan_batch<true, 7UL, (lambda at proto/src/main.cpp:493:53)>
+   32 0x14ed4 main.cpp:356 validate
+   31 0x154d0 keys.hpp:197 w3::Keys::put(unsigned int, std::__1::basic_string_view<char, std::__1::char_traits<char>>, unsigned long
+   31 0x19264 main.cpp:244 add<w3::Engine<w3::Atom>::Worker, std::__1::vector<std::__1::unique_ptr<w3::Engine<w3::Atom>::Worker, std
+   31 0x19bc4 main.cpp:0 w3::Names::intern(w3::Id, unsigned int, w3::Keys const&)
+   29 0x17b98 radix.hpp:74 allocate
+   27 0x154b0 keys.hpp:17 literal_hash
+   26 0x1c00c main.cpp:585 operator()
+   26 0x1dcd8 main.cpp:276 sort_events<w3::Atom>
+   25 0x15c70 input.hpp:929 w3::Dates::millis(std::__1::basic_string_view<char, std::__1::char_traits<char>>) const
+   24 0x14f34 main.cpp:356 validate
+   23 0x1d670 aggregate.hpp:105 add
+   22 0x14db0 string_view:412 empty
+   21 0x19ba4 main.cpp:0 w3::Names::intern(w3::Id, unsigned int, w3::Keys const&)
+   20 0x152d8 keys.hpp:197 w3::Keys::put(unsigned int, std::__1::basic_string_view<char, std::__1::char_traits<char>>, unsigned long
+   20 0x15384 input.hpp:87 load<unsigned long long>
+   20 0x9b28 input.hpp:513 bool w3::quote_boundaries<&w3::parity_neon(unsigned long long)>(w3::Masks const*, unsigned long)
+   20 0x190f8 main.cpp:558 operator()
+   19 0x1925c main.cpp:180 candidates
+100014ed0:     	cbz	x8, 0x100014f10 <__ZZN2w36EngineINS_4AtomEE11scan_eventsEjRNS2_6WorkerERKNS_4PartEENKUlRKT_E_clINSt3__15arrayINSD_17basic_string_viewIcNSD_11char_traitsIcEEEELm7EEEEEDaSA_+0x180>
+100014ed4:     	ldp	x8, x27, [x23, #0x40]
+100014ed8:     	cmp	x27, #0x8
+100014edc:     	b.eq	0x100014f18 <__ZZN2w36EngineINS_4AtomEE11scan_eventsEjRNS2_6WorkerERKNS_4PartEENKUlRKT_E_clINSt3__15arrayINSD_17basic_string_viewIcNSD_11char_traitsIcEEEELm7EEEEEDaSA_+0x188>
+1000150d0:     	mov	w11, #0x1040            ; =4160
+1000150d4:     	madd	x8, x10, x11, x8
+1000150d8:     	str	xzr, [x8]
+1000150dc:     	ldp	x11, x10, [x28]
+100015c70:     	stp	x29, x30, [sp, #0x10]
+100015c74:     	add	x29, sp, #0x10
+100015c78:     	mov	x19, x0
+100015c7c:     	cmp	x2, #0xd
+100015c80:     	b.ne	0x100015d50 <__ZNK2w35Dates6millisENSt3__117basic_string_viewIcNS1_11char_traitsIcEEEE+0xe4>
+100015c84:     	mov	x10, #0xf0f0f0f0f0f0f0f ; =1085102592571150095
+100015c88:     	movk	x10, #0xf0e
+100015c8c:     	ldr	x9, [x1]
+100019230:     	cbnz	w8, 0x1000194d4 <__ZNSt3__110__function6__funcIZN2w36EngineINS2_4AtomEE3runEyEUljmE_FvjmEEclEOjOm+0x6f8>
+100019234:     	ldp	x11, x8, [sp, #0xa0]
+100019238:     	and	x9, x10, x11
+10001923c:     	str	x9, [sp, #0xe8]
+100019450:     	ldr	x13, [sp, #0xc8]
+100019454:     	ldr	x15, [sp, #0x98]
+100019458:     	b.hs	0x1000190d4 <__ZNSt3__110__function6__funcIZN2w36EngineINS2_4AtomEE3runEyEUljmE_FvjmEEclEOjOm+0x2f8>
+10001945c:     	b	0x1000194bc <__ZNSt3__110__function6__funcIZN2w36EngineINS2_4AtomEE3runEyEUljmE_FvjmEEclEOjOm+0x6e0>
+10001c000:     	ldr	w25, [x24, #0x8]
+10001c004:     	cmn	w25, #0x1
+10001c008:     	b.ne	0x10001bf34 <__ZNSt3__110__function6__funcIZN2w36EngineINS2_4AtomEE3runEyEUljmE0_FvjmEEclEOjOm+0x358>
+10001c00c:     	ldr	x8, [sp, #0x58]

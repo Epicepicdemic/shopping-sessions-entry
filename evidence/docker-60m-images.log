@@ -1,0 +1,5 @@
+Loaded image: shopping-w4:control
+Loaded image: shopping-w5:baseline
+guest_arch=aarch64 vcpus=8 memory_bytes=12514275328 cgroup_v=2
+linux/amd64 user=1000:1000 image=sha256:d0959bcfdfffd3babaf5b6a252295c4a35bae09c22bad712b188bcdf2da86add
+linux/amd64 user=1000:1000 image=sha256:c2324d4b99653c1f372060aa59b3466be4b3a272632bd491a92bdbceed7f4714

@@ -1,90 +1,75 @@
-# Shopping Sessions (Databricks)
+# Shopping Sessions v5 · Wave 5
 
-A click-stream sessionisation pipeline for the Shopping Sessions track. Entry for the Builders Buildathon, November 2026.
+This repository is our team's own Wave-5 engine for the Shopping Sessions track: a C++20 program the team wrote for the v5 data, which treats every ID as an opaque string. It replaces the team's earlier Rust entry, which stays in this repository's history. The image sets `SHOPPING_IO_MODE=pread`, so it reads input with positioned reads; `-e SHOPPING_IO_MODE=mmap` restores memory mapping.
 
-## Layout
+Third-party code: the [mimalloc](https://github.com/microsoft/mimalloc) 2.2.7 allocator (MIT license, Microsoft), downloaded at build time with a pinned SHA-256 checksum and linked statically; its license ships in the image at `/licenses/mimalloc.txt` and in [`proto/third_party`](proto/third_party/mimalloc-LICENSE.txt). The Docker build compiles with Alpine Linux's GCC and musl (pinned package versions; base image pinned by digest). The Python tools in `proto/tools` and `proto/tests` use pyarrow and duckdb for benchmarks and comparisons. Test data comes from the organisers' v5 generator, which is not included.
 
-- `fast/`: the Rust implementation (standard library only, no third-party crates). `fast/tests/extended.py` generates extra general test cases; `fast/tools/` has a timing helper and a native macOS build helper.
-- `reference/`: a slow, simple implementation of `rules.md` that is meant to be obviously correct. Every fast version is compared with it. `reference/README.md` explains how to run it and the harness, and lists the open questions about the rules.
-- `harness/`: `check.py` runs any implementation and compares its two Parquet tables with the reference, row for row. The folder also holds deliberately broken copies (`broken/`), a mutation survey (`mutants.py`), a layout scrambler (`scramble.py`) and the fixtures (`fixtures/kit`, `fixtures/adversarial`).
+C++20 CSV-to-Parquet engine for the v5 contract. It deduplicates by earliest ingest, resolves transitive links to the bytewise-minimum identity, and writes `user_daily` and `campaign_daily`. The checked path supports opaque byte strings, wide dates and categories, and variable-width rows. [Results and verification](BREAKTHROUGH-V5-W5.md)
 
-The generated data sets are not in the repository.
+## Linux x86-64 drop-in
 
-## The generator, and what the fast path relies on
-
-We used the organisers' dataset generator (`generator.zip`, Rust; not included here) to make test data, and we read its source. The fast path is built on its ID encoding:
-
-- The generator writes each event and user ID as a prefix plus the base-36 form of a 40-bit scramble of a counter. The scramble uses two fixed multipliers and a secret key per data set. The fast path contains the inverse of that scramble, with the generator's two multipliers, and recovers the keys from a sample of the input at startup.
-- It then checks everything it relies on against the data itself:
-  - every ID it decodes is in canonical form (prefix, lowercase base 36, no leading zero, below 2^40), so decoding is one-to-one;
-  - each person's IDs, and the aliases their rows use, form one link component;
-  - all of a person's events fall in one counter bucket (all copies of an event share a counter, so they always do).
-- A row or person that fails a check goes to the exact solver. So does a whole input whose IDs are not in this form, or whose keys are not found.
-
-The exact solver does not use the generator's encoding; it implements the rules for any IDs. Output is the same on either path; the fast path only changes speed. `SHOPPING_FAST=0` runs the exact solver alone.
-
-## Third-party code and libraries
-
-- **pyarrow** (Apache License 2.0). The reference uses it to write Parquet and the harness uses it to read Parquet.
-- **The organisers' starter kit fixtures.** `harness/fixtures/kit/` is an unchanged copy of the 36 edge-case fixtures from the track's starter kit. The kit's README says to copy them in when publishing a starter as its own repository.
-- **The organisers' dataset generator**, as described above. No generator code is included; the fast path uses its two scramble multipliers.
-
-No other code written before the event is used.
-
-## Build and run
-
-The Dockerfile pins its builder (`rust:1.100`) by digest and produces an image containing only three static builds of one binary: portable, x86-64-v3 and x86-64-v4. The portable build checks the CPU and runs the v3 build when the CPU supports it. The runtime runs as uid 1000 and writes only to `OUTPUT_DIR`.
+Use `bin/shopping-w5-linux-x86_64` as the scorer executable, or build the image from this directory. The executable accepts input and output directories as two positional arguments or via `DATA_DIR` and `OUTPUT_DIR`, which default to `/data` and `/output`. Start with an empty output directory writable by UID 1000.
 
 ```sh
-docker build --platform linux/amd64 -t shopping-fast .
-docker run --rm --platform linux/amd64 --read-only --network none \
-  --user 1000:1000 --cpus 8 --memory 24g --memory-swap 24g \
-  --pids-limit 4096 --tmpfs /tmp:rw,size=64m \
-  -v "$DATA:/data:ro" -v "$OUT:/output" -v "$SCRATCH:/scratch" \
-  -e DATA_DIR=/data -e OUTPUT_DIR=/output -e SCRATCH_DIR=/scratch \
-  -e HOME=/scratch -e NCPU=8 -e MEM_GB=24 shopping-fast
+mkdir -p work/output
+chmod a+w work/output
+bin/shopping-w5-linux-x86_64 work/input work/output
 ```
-
-Input and output directories can also be given as two positional arguments. Use a fresh output directory for each run.
-
-Switches, for measurement:
-
-| Switch | Effect |
-|---|---|
-| `SHOPPING_TIMING=1` | Logs stage times, the build and bucket width chosen, and peak RSS to stderr. |
-| `SHOPPING_FAST=0` | Runs the exact solver only. |
-| `SHOPPING_COMPACT_LINKS=0` | Builds the full exact link graph instead of the compact one (fast path only). |
-| `SHOPPING_BUILD=portable` or `v4` | Forces a build. The default is v3 when the CPU has it. |
-| `SHOPPING_QB=13`..`16` | Forces the bucket width. The default comes from the CPU's L2 size. |
-| `SHOPPING_PREAD=1` | Reads input with `pread` instead of `mmap`. |
-| `SHOPPING_USE_BINS=1` | Uses half-hour counting order instead of sorting for large histories. |
-| `SHOPPING_ASSISTS=rescan` | Uses the slower direct assist scan. |
-
-## How it works
-
-- **Scan.** Each input file is split into newline-aligned ranges. A single-pass splitter validates the CSV structure: SIMD in the v3 and v4 builds, scalar in the portable build and with `--features scalar`. IDs of up to ten supported characters pack into 60 bits; longer IDs go to byte arenas.
-- **Exact solver.**
-  - Events are deduplicated in 2,048 hash shards, keeping the earliest ingest; an invalid earliest copy is kept as a marker.
-  - Links are resolved with union-find, naming each person by the bytewise-smallest ID.
-  - Each person's events are sessionised, with latest-click attribution and assists.
-- **Fast path.**
-  - Verified rows are stored as 16-byte records in counter buckets. A row that does not fit 16 bytes, such as a purchase, keeps a 24-byte side record.
-  - Each bucket deduplicates with a direct array and sessionises its people in the same pass.
-  - Links between aliases of one decoded person form a compact graph: if they make one connected component that no other link touches, the person gets an alias mask and the bytewise-smallest name directly. Every other link goes to the exact link graph, which is always consulted first.
-  - People who fail a check go to the exact solver.
-- **Output.** Plain, uncompressed Parquet.
-
-## Tests
-
-Tests run outside the image build:
 
 ```sh
-(cd fast && cargo test --release && cargo test --release --features scalar)
-python harness/check.py fixtures harness/fixtures/kit harness/fixtures/adversarial -- /path/to/shopping-fast
-python harness/check.py data DATA_DIR --expected EXPECTED_DIR -- /path/to/shopping-fast
-python fast/tests/extended.py /path/outside/repository/extended -- /path/to/shopping-fast
+docker build --platform linux/amd64 --provenance=false -t shopping-w5 .
+docker run --rm --platform linux/amd64 --read-only --network none --user 1000:1000 \
+  --cpus 8 --memory 12g --memory-swap 12g -e W5_TIMING=1 \
+  --mount "type=bind,src=$PWD/work/input,dst=/data,readonly" \
+  --mount "type=bind,src=$PWD/work/output,dst=/output" shopping-w5
 ```
 
-## License
+The static musl executable links the pinned mimalloc object first. A baseline entry point reads CPUID and XGETBV and dispatches the complete engine to x86-64-v4, v3, or v2. AVX-512BW and AVX2 CSV classifiers are both included. Linux uses mapped input by default. The engine reserves two lazily committed pools at setup and reuses the dedup pool for grouped histories. [Dockerfile](Dockerfile) · [Static linkage](evidence/linux-elf.log) · [Instruction excerpts](evidence/linux-instructions.log) · [Allocator license](proto/third_party/mimalloc-LICENSE.txt)
 
-MIT. See [LICENSE](LICENSE).
+| Setting | Default | Effect |
+|---|---|---|
+| `NCPU` | Automatic | Linux uses CPU affinity and visible cgroup v1 or v2 CPU quotas, rounded up, with a 64-worker limit. The explicit override accepts 1–64. macOS defaults to up to 8 workers. |
+| `SHOPPING_IO_MODE` | Linux `mmap`, macOS `pread` | Supports `pread`, `mmap`, `sequential` and `willneed`. Linux positioned reads use `POSIX_FADV_SEQUENTIAL`. `W4_IO` remains an alias. |
+| `SHOPPING_THP` | `0` | Set `1` to advise transparent huge pages on Linux pools. |
+| `SHOPPING_SCALAR` | `0` | Set `1` to use the scalar classifier and the baseline x86 pipeline. `W4_SCALAR` remains an alias. |
+| `SHOPPING_AVX2` | `0` | Set `1` to bypass AVX-512 dispatch on x86-64. `W4_AVX2` remains an alias. |
+| `SHOPPING_BASELINE` | `0` | Set `1` to run the v2 x86 pipeline while retaining SIMD classifier dispatch. |
+| `W5_TIMING` | `0` | Emit ISA, worker count, phase clocks, peak process RSS, faults and available Linux cgroup counters. |
+| `W4_EVENT_BITS`, `W4_USER_BITS` | From event input bytes | Override the radix partition widths. |
+| `W4_CHUNK_KIB` | `2048` | Scan job size in KiB. |
+| `W4_CELL_THRESHOLD` | `16` | Minimum history size for 30-minute time cells on the compact path. |
+| `W2_SYNC` | `0` | Sync each Parquet part before close. |
+
+## Native build and verification
+
+```sh
+mkdir -p work/bin work/tmp
+export TMPDIR="$PWD/work/tmp/"
+clang++ -std=c++20 -O3 -DNDEBUG -mcpu=native -flto=thin -pthread \
+  proto/src/main.cpp -o work/bin/shopping-w5
+```
+
+Use the current kit generator with seeds 2005 and 6005 and event/click counts of 20M/5M and 60M/15M. Keep one generated large dataset at a time. Use the published seed-1 input and expected tables for dev. The native comparator requires `duckdb` and `pyarrow`.
+
+```sh
+NCPU=8 W4_IO=pread python3 -B proto/tools/bench.py work/input \
+  --temp-root work/bench --keep-first work/check --pairs 7 \
+  --candidate work/bin/shopping-w5 --control work/bin/shopping-w4
+python3 -B proto/tools/compare.py work/check/candidate work/check/control --temp-root work/compare
+```
+
+`proto/tools/bench_docker.py` takes matching candidate and control image names and applies the amd64 restrictions above. Its receipts capture process and host wall times, RSS, cgroup peaks, and per-phase clocks. Set `SHOPPING_FAST=0` for the independent Rust control. The comparator checks both schemas, keyed values, duplicate keys and cross-table totals.
+
+With `CONTROL_REPO` set to the supplied checkout, run its fixture harness once in each scanner mode. `proto/tests/opaque_cases.py` creates the additional stress inputs for the supplied Python reference.
+
+```sh
+NCPU=8 SHOPPING_SCALAR=0 python3 -B "$CONTROL_REPO/harness/check.py" fixtures \
+  "$CONTROL_REPO/harness/fixtures/kit" "$CONTROL_REPO/harness/fixtures/adversarial" \
+  -- "$PWD/work/bin/shopping-w5"
+
+clang++ -std=c++20 -O1 -gline-tables-only -mcpu=native -pthread \
+  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  -DSHOPPING_CLEAN_EXIT proto/src/main.cpp -o work/bin/shopping-w5-sanitized
+```
+
+Sanitizer builds retain normal C++ teardown. Production closes both Parquet outputs, flushes C streams, and uses `_exit(0)` to reclaim the pools and other transient state together.

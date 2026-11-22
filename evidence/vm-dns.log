@@ -1,0 +1,31 @@
+time="2026-11-22T04:30:15-05:00" level=warning msg="treating lima version `<unknown>` from `l/w/lima-version` as very latest release"
+cat: /etc/resolv.conf: No such file or directory
+../run/systemd/resolve/stub-resolv.conf
+default via 192.168.5.2 dev eth0 proto dhcp src 192.168.5.15 metric 200 
+172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown 
+192.168.5.0/24 dev eth0 proto kernel scope link src 192.168.5.15 metric 200 
+192.168.5.2 dev eth0 proto dhcp scope link src 192.168.5.15 metric 200 
+lrwxrwxrwx 1 root root 39 May 21  2026 /etc/resolv.conf -> ../run/systemd/resolve/stub-resolv.conf
+inactive
+127.0.0.1 localhost
+
+# The following lines are desirable for IPv6 capable hosts
+::1 ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+ff02::3 ip6-allhosts
+192.168.5.2	host.lima.internal
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0HTTP/2 301 
+date: Sun, 22 Nov 2026 09:30:16 GMT
+location: https://one.one.one.one/
+server: cloudflare
+cf-ray: a5e6ea1ba9652bdb-DTW
+
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0

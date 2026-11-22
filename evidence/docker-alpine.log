@@ -1,0 +1,9 @@
+3.23: Pulling from library/alpine
+74c614fb2c68: Pulling fs layer
+57f9e5aca0ee: Download complete
+ae5f99bda370: Download complete
+74c614fb2c68: Download complete
+74c614fb2c68: Pull complete
+Digest: sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
+Status: Downloaded newer image for alpine:3.23
+docker.io/library/alpine:3.23

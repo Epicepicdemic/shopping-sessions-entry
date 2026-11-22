@@ -1,0 +1,21 @@
+time="2026-11-22T05:05:12-05:00" level=warning msg="treating lima version `<unknown>` from `l/w/lima-version` as very latest release"
+time="2026-11-22T05:05:12-05:00" level=info msg="Sending SIGINT to hostagent process 89499"
+time="2026-11-22T05:05:12-05:00" level=info msg="Waiting for the host agent and the driver processes to shut down"
+time="2026-11-22T05:05:12-05:00" level=info msg="[hostagent] Received SIGINT, shutting down the host agent"
+time="2026-11-22T05:05:12-05:00" level=info msg="[hostagent] Shutting down the host agent"
+time="2026-11-22T05:05:12-05:00" level=info msg="[hostagent] Shutting down VZ"
+time="2026-11-22T05:05:13-05:00" level=info msg="[hostagent] [VZ] - vm state change: stopped"
+time="2026-11-22T05:05:13-05:00" level=info msg="[hostagent] gvproxy API request" component=services-api endpoint=/services/forwarder/unexpose local="127.0.0.1:54324" method=POST outcome=success protocol=tcp source=
+time="2026-11-22T05:05:13-05:00" level=error msg="[hostagent] accept tcp 127.0.0.1:54324: use of closed network connection"
+time="2026-11-22T05:05:13-05:00" level=info msg="Waiting for the instance to shut down"
+time="2026-11-22T05:05:14-05:00" level=warning msg="treating lima version `<unknown>` from `l/w/lima-version` as very latest release"
+time="2026-11-22T05:05:14-05:00" level=info msg="The instance w has shut down"
+time="2026-11-22T05:05:14-05:00" level=warning msg="treating lima version `<unknown>` from `l/w/lima-version` as very latest release"
+time="2026-11-22T05:05:14-05:00" level=warning msg="treating lima version `<unknown>` from `l/w/lima-version` as very latest release"
+time="2026-11-22T05:05:14-05:00" level=info msg="The vz driver process seems already stopped"
+time="2026-11-22T05:05:14-05:00" level=info msg="The host agent process seems already stopped"
+time="2026-11-22T05:05:14-05:00" level=info msg="Removing *.pid *.sock *.tmp under `l/w`"
+time="2026-11-22T05:05:14-05:00" level=info msg="Removing `l/w/boot-session.tmp`"
+time="2026-11-22T05:05:14-05:00" level=info msg="Deleted `w` (`l/w`)"
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   926Gi    13Gi    12Gi    52%    487k  127M    0%   /

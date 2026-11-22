@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!proto/
+!proto/src/
+!proto/src/**
+!proto/tools/
+!proto/tools/build-linux.sh

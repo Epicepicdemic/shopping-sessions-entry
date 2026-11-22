@@ -1,0 +1,17 @@
+time="2026-11-22T04:27:44-05:00" level=warning msg="treating lima version `<unknown>` from `l/w/lima-version` as very latest release"
+aarch64
+/usr/bin/docker
+PRETTY_NAME="Ubuntu 24.04.4 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.4 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/root        11G  864M  9.8G   8% /
+enabled
+interpreter /mnt/lima-rosetta/rosetta
+flags: OCF
+offset 0
+magic 7f454c4602010100000000000000000002003e00
+mask fffffffffffefe00fffffffffffffffffeffffff
+/usr/bin/curl

@@ -1,0 +1,80 @@
+warning[E0133]: call to unsafe function `std::arch::aarch64::vdupq_n_u8` is unsafe and requires unsafe block
+  --> ../../2026-11-21-i-just-entered-into-ohio-7828c830/repos/buildathon-shopping-sessions/fast/src/parse.rs:91:14
+   |
+91 |     let nl = vdupq_n_u8(b'\n');
+   |              ^^^^^^^^^^^^^^^^^ call to unsafe function
+   |
+   = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+  --> ../../2026-11-21-i-just-entered-into-ohio-7828c830/repos/buildathon-shopping-sessions/fast/src/parse.rs:87:1
+   |
+87 | unsafe fn find_newline_neon(buf: &[u8]) -> Option<usize> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(unsafe_op_in_unsafe_fn)]` on by default
+
+warning[E0133]: call to unsafe function `std::arch::aarch64::vceqq_u8` is unsafe and requires unsafe block
+  --> ../../2026-11-21-i-just-entered-into-ohio-7828c830/repos/buildathon-shopping-sessions/fast/src/parse.rs:94:19
+   |
+94 |         let cmp = vceqq_u8(chunk, nl);
+   |                   ^^^^^^^^^^^^^^^^^^^ call to unsafe function
+   |
+   = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: consult the function's documentation for information on how to avoid undefined behavior
+
+warning[E0133]: call to unsafe function `std::arch::aarch64::vgetq_lane_u64` is unsafe and requires unsafe block
+  --> ../../2026-11-21-i-just-entered-into-ohio-7828c830/repos/buildathon-shopping-sessions/fast/src/parse.rs:96:18
+   |
+96 |         let lo = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 0);
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+   |
+   = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: consult the function's documentation for information on how to avoid undefined behavior
+
+warning[E0133]: call to unsafe function `std::arch::aarch64::vreinterpretq_u64_u8` is unsafe and requires unsafe block
+  --> ../../2026-11-21-i-just-entered-into-ohio-7828c830/repos/buildathon-shopping-sessions/fast/src/parse.rs:96:33
+   |
+96 |         let lo = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 0);
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+   |
+   = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: consult the function's documentation for information on how to avoid undefined behavior
+
+warning[E0133]: call to unsafe function `std::arch::aarch64::vgetq_lane_u64` is unsafe and requires unsafe block
+   --> ../../2026-11-21-i-just-entered-into-ohio-7828c830/repos/buildathon-shopping-sessions/fast/src/parse.rs:100:18
+    |
+100 |         let hi = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 1);
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+
+warning[E0133]: call to unsafe function `std::arch::aarch64::vreinterpretq_u64_u8` is unsafe and requires unsafe block
+   --> ../../2026-11-21-i-just-entered-into-ohio-7828c830/repos/buildathon-shopping-sessions/fast/src/parse.rs:100:33
+    |
+100 |         let hi = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 1);
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+
+warning: constant `SIDE_AHEAD` is never used
+  --> ../../2026-11-21-i-just-entered-into-ohio-7828c830/repos/buildathon-shopping-sessions/fast/src/main.rs:45:7
+   |
+45 | const SIDE_AHEAD: usize = 24;
+   |       ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: constant `PREFETCH` is never used
+  --> ../../2026-11-21-i-just-entered-into-ohio-7828c830/repos/buildathon-shopping-sessions/fast/src/scan.rs:21:7
+   |
+21 | const PREFETCH: usize = 4096;
+   |       ^^^^^^^^
+
+warning: 8 warnings emitted
+
+For more information about this error, try `rustc --explain E0133`.
+0c01719ae433ba97271b46352488b50a1e0221c6
+work/bin/rust-control: Mach-O 64-bit executable arm64
+work/bin/generate:     Mach-O 64-bit executable arm64

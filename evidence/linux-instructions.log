@@ -1,0 +1,96 @@
+llvm-objdump -d --demangle --no-show-raw-insn bin/shopping-w5-linux-x86_64
+
+ baseline pipeline jump targets 000000000002b550 (4 matching instructions)
+   2b586:      	jmp	0x5d6c0 <shopping_v2>
+   2b5ab:      	callq	0x497d0 <shopping_cpu::x86_features() (.lto_priv.1.lto_priv.0)>
+   2b5d5:      	jmp	0x9f5d0 <shopping_v3>
+   2b605:      	jmp	0xe1d90 <shopping_v4>
+
+ mimalloc TLS allocator entry 00000000000478f0 (3 matching instructions)
+   478f0:      	movq	%fs:-0x20, %r9
+   4793d:      	jmp	0x43ab0 <_mi_malloc_generic>
+   47953:      	jmp	0x43ab0 <_mi_malloc_generic>
+
+ baseline CPU and OS state checks 00000000000497d0 (7 matching instructions)
+   497d3:      	cpuid
+   497e2:      	cpuid
+   49833:      	xgetbv
+   49841:      	cpuid
+   4984f:      	cpuid
+   498a4:      	cpuid
+   498b6:      	cpuid
+
+ v3 32-byte AVX2 classification 000000000008dd80 (14 matching instructions)
+   8ddd0:      	vmovdqu	0x20(%rcx), %ymm1
+   8ddd5:      	vmovdqu	(%rcx), %ymm0
+   8dde1:      	vpcmpeqb	%ymm4, %ymm1, %ymm8
+   8dde5:      	vpcmpeqb	%ymm4, %ymm0, %ymm7
+   8dde9:      	vpcmpeqb	%ymm3, %ymm1, %ymm6
+   8dded:      	vpcmpeqb	%ymm3, %ymm0, %ymm5
+   8ddf1:      	vpcmpeqb	%ymm2, %ymm1, %ymm1
+   8ddf5:      	vpcmpeqb	%ymm2, %ymm0, %ymm0
+   8ddf9:      	vpmovmskb	%ymm8, %edx
+   8ddfe:      	vpmovmskb	%ymm7, %edi
+   8de09:      	vpmovmskb	%ymm5, %edi
+   8de11:      	vpmovmskb	%ymm6, %edx
+   8de1c:      	vpmovmskb	%ymm0, %edi
+   8de24:      	vpmovmskb	%ymm1, %edx
+
+ v3 16-lane AVX2 event dedup probes 00000000000a6a90 (6 matching instructions)
+   a6e1e:      	vpcmpeqw	(%rbx), %ymm1, %ymm0
+   a6e22:      	vpmovmskb	%ymm0, %r13d
+   a6e39:      	tzcntq	%r13, %r12
+   a795f:      	vpcmpeqw	(%rbx), %ymm1, %ymm0
+   a7963:      	vpmovmskb	%ymm0, %edi
+   a7975:      	tzcntq	%rdi, %r12
+
+ v3 checked seven-field event scan and split 00000000000c5130 (44 matching instructions)
+   c51d8:      	shrxq	%rcx, %r9, %r9
+   c51e5:      	blsrq	%r8, %rdi
+   c51ea:      	blsrq	%rdi, %rdx
+   c51ef:      	tzcntq	%rdx, %rdx
+   c5244:      	bzhiq	%r11, %rsi, %rsi
+   c5249:      	blsrq	%rsi, %rcx
+   c524e:      	blsrq	%rcx, %r8
+   c5262:      	tzcntq	%rcx, %rcx
+   c5267:      	tzcntq	%r8, %r8
+   c526c:      	tzcntq	%r10, %r10
+   c5271:      	tzcntq	%rdi, %rdi
+   c5278:      	tzcntq	%rsi, %rsi
+   c562e:      	shrxl	%eax, (%rsp), %esi
+   c56b2:      	blsrq	%rsi, %rdx
+   c56bc:      	tzcntq	%rdx, %r8
+
+ v4 64-byte AVX-512BW classification 00000000000ceb20 (7 matching instructions)
+   ceb80:      	vmovdqu64	(%rdi), %zmm0
+   ceb8e:      	vpcmpeqb	%zmm3, %zmm0, %k0
+   ceb95:      	vpcmpeqb	%zmm2, %zmm0, %k1
+   ceb9c:      	vpcmpeqb	%zmm1, %zmm0, %k2
+   ceba3:      	kmovq	%k0, -0x18(%rsi)
+   ceba9:      	kmovq	%k1, -0x10(%rsi)
+   cebaf:      	kmovq	%k2, -0x8(%rsi)
+
+ v4 16-lane AVX-512BW event dedup probes 00000000000e94a0 (6 matching instructions)
+   e980c:      	vpcmpeqw	(%rbx), %ymm0, %k0
+   e9813:      	kmovq	%k0, %r9
+   e9833:      	tzcntq	%r9, %rax
+   ea2ea:      	vpcmpeqw	(%r13), %ymm0, %k1
+   ea2f2:      	kmovq	%k1, %rbx
+   ea312:      	tzcntq	%rbx, %rax
+
+ v4 checked seven-field event scan and split 0000000000108b70 (44 matching instructions)
+  108c08:      	shrxq	%rcx, %r11, %r11
+  108c25:      	blsrq	%r10, %r11
+  108c2a:      	blsrq	%r11, %r9
+  108c2f:      	tzcntq	%r9, %r9
+  108c7a:      	bzhiq	%rbx, %rsi, %rsi
+  108c81:      	blsrq	%rsi, %rcx
+  108c86:      	blsrq	%rcx, %rdi
+  108c9b:      	tzcntq	%rcx, %rcx
+  108ca0:      	tzcntq	%rdi, %rdi
+  108ca5:      	tzcntq	%r11, %r11
+  108caa:      	tzcntq	%r10, %rbx
+  108caf:      	tzcntq	%rsi, %rsi
+  109094:      	shrxl	%eax, (%rsp), %esi
+  10912e:      	blsrq	%rsi, %rcx
+  109136:      	tzcntq	%rcx, %r9

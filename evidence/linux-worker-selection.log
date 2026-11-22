@@ -1,0 +1,36 @@
+
+fractional --cpus 2.5
+w5 isa=x86-64-v3 scanner=avx2 workers=3 event_bits=6 user_bits=6 time=compact sync=0 input_bytes=103584969 user_rows=118107 campaign_rows=27449 peak_rss_bytes=196157440 minor_faults=20587 major_faults=141
+w5_ms setup=84.808 scan=223.424 dedup=16.396 links=2.926 group=18.782 reduce_write=32.224 campaign_write=9.774 total=388.334
+w5_worker_ms reduce=21.697 write=9.302
+w5_cgroup memory.max=12884901888
+w5_cgroup memory.peak=203300864
+w5_cgroup memory.swap.max=0
+w5_cgroup cpu.max=250000 100000
+
+affinity --cpus 8 --cpuset-cpus 0-1
+w5 isa=x86-64-v3 scanner=avx2 workers=2 event_bits=6 user_bits=6 time=compact sync=0 input_bytes=103584969 user_rows=118107 campaign_rows=27449 peak_rss_bytes=192884736 minor_faults=18792 major_faults=477
+w5_ms setup=518.672 scan=905.798 dedup=22.991 links=2.983 group=27.252 reduce_write=114.468 campaign_write=54.030 total=1646.194
+w5_worker_ms reduce=24.744 write=86.651
+w5_cgroup memory.max=12884901888
+w5_cgroup memory.peak=198979584
+w5_cgroup memory.swap.max=0
+w5_cgroup cpu.max=800000 100000
+
+override --cpus 8 -e NCPU=10
+w5 isa=x86-64-v3 scanner=avx2 workers=10 event_bits=6 user_bits=6 time=compact sync=0 input_bytes=103584969 user_rows=118107 campaign_rows=27449 peak_rss_bytes=217853952 minor_faults=24722 major_faults=1102
+w5_ms setup=300.440 scan=289.064 dedup=23.241 links=4.909 group=28.994 reduce_write=190.413 campaign_write=82.564 total=919.625
+w5_worker_ms reduce=45.012 write=142.383
+w5_cgroup memory.max=12884901888
+w5_cgroup memory.peak=225968128
+w5_cgroup memory.swap.max=0
+w5_cgroup cpu.max=800000 100000
+
+scalar --cpus 8 -e SHOPPING_SCALAR=1
+w5 isa=x86-64-v2 scanner=scalar workers=8 event_bits=6 user_bits=6 time=compact sync=0 input_bytes=103584969 user_rows=118107 campaign_rows=27449 peak_rss_bytes=213356544 minor_faults=23194 major_faults=581
+w5_ms setup=313.949 scan=263.557 dedup=19.913 links=9.520 group=53.220 reduce_write=128.372 campaign_write=19.380 total=807.911
+w5_worker_ms reduce=74.017 write=41.143
+w5_cgroup memory.max=12884901888
+w5_cgroup memory.peak=220577792
+w5_cgroup memory.swap.max=0
+w5_cgroup cpu.max=800000 100000

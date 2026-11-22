@@ -1,1 +1,0 @@
-Timestamps: "`ingest_ts` is always valid F1"; Events step 2: "Keep only the copy with the smallest `ingest_ts`"; step 4: "Exactly 24 hours is kept, and so is an `ingest_ts` before `ts`."

@@ -1,0 +1,43 @@
+#0 building with "default" instance using docker driver
+
+#1 [build 1/6] FROM docker.io/library/shopping-w5:allocator@sha256:f757adc1e97b3194246bf57f9f7127ef4dd7110a411cc6a61186ef4898cc4ef6
+#1 resolve docker.io/library/shopping-w5:allocator@sha256:f757adc1e97b3194246bf57f9f7127ef4dd7110a411cc6a61186ef4898cc4ef6 0.0s done
+#1 DONE 0.0s
+
+#2 [build 2/5] WORKDIR /src
+#2 DONE 0.0s
+
+#3 [internal] load build definition from Dockerfile
+#3 transferring dockerfile: 949B done
+#3 DONE 0.0s
+
+#4 [internal] load metadata for docker.io/library/shopping-w5:allocator
+#4 DONE 0.0s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 5.66MB 0.1s done
+#6 DONE 0.1s
+
+#7 [build 3/5] COPY src/ .
+#7 DONE 0.1s
+
+#8 [build 4/5] COPY train/ /train/
+#8 DONE 0.1s
+
+#9 [build 5/5] RUN printf '%s\n' 'extern void __gcov_dump(void); void shopping_profile_end(void) { __gcov_dump(); }' > dump.c &&     gcc -O2 -c dump.c -o dump.o &&     SHOPPING_CXXFLAGS='-O3 -DNDEBUG -mtune=generic -flto=auto -fno-rtti -fprofile-generate=/profiles -fprofile-update=atomic'       sh build-linux.sh /training /mimalloc.o dump.o &&     NCPU=1 /training /train /training-v3 && SHOPPING_BASELINE=1 NCPU=1 /training /train /training-v2 &&     printf '%s\n' 'void shopping_profile_end(void) {}' > dump.c && gcc -O2 -c dump.c -o dump.o &&     SHOPPING_CXXFLAGS='-O3 -DNDEBUG -mtune=generic -flto=auto -fno-rtti -fprofile-use=/profiles -fprofile-correction'       sh build-linux.sh /shopping-w5 /mimalloc.o dump.o
+#9 DONE 84.2s
+
+#10 [stage-1 1/1] COPY --from=build /shopping-w5 /app/shopping-w5
+#10 DONE 0.0s
+
+#11 exporting to image
+#11 exporting layers
+#11 exporting layers 0.2s done
+#11 exporting manifest sha256:a1d87d0635034fc478c13a4f172b9779e036344049fe0d245f8987dac4bd6839 done
+#11 exporting config sha256:5d22418752990e2bc386c48d1f584533a6c1df5d035c30621634a38e707264a3 done
+#11 naming to docker.io/library/shopping-w5:pgo done
+#11 DONE 0.2s

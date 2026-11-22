@@ -1,0 +1,6 @@
+w4 scanner=neon workers=8 event_bits=6 user_bits=6 time=compact sync=0 input_bytes=103584969 user_rows=118107 campaign_rows=27449 peak_rss_bytes=111558656 minor_faults=7148 major_faults=48
+w4_ms setup=9.075 scan=15.871 dedup=2.532 links=0.858 group=2.596 reduce_write=4.394 campaign_write=1.193 total=36.519
+w4_worker_ms reduce=3.199 write=0.795
+user_daily: MATCH rows 118107 (expected 118107), missing 0, extra 0, differing 0, duplicate keys 0, expected duplicate keys 0
+campaign_daily: MATCH rows 27449 (expected 27449), missing 0, extra 0, differing 0, duplicate keys 0, expected duplicate keys 0
+sessions user/campaign 181032/181032, revenue 352767593/352767593, assists 1958238, credited non-organic sessions 111113

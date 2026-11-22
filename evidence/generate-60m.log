@@ -1,0 +1,25 @@
+       14.07 real        47.30 user        13.64 sys
+          3704717312  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1519979  page reclaims
+                  29  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+               42823  voluntary context switches
+              371436  involuntary context switches
+        529221838183  instructions retired
+        203745517256  cycles elapsed
+          8975492456  peak memory footprint
+5.9G	work/60m
+{
+  "window_start": "2025-06-02T00:00:00Z",
+  "window_end": "2025-06-16T00:00:00Z"
+}
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   926Gi    13Gi    12Gi    52%    487k  128M    0%   /

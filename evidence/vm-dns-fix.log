@@ -1,0 +1,33 @@
+time="2026-11-22T04:30:52-05:00" level=warning msg="treating lima version `<unknown>` from `l/w/lima-version` as very latest release"
+sudo: unable to resolve host lima-w: Temporary failure in name resolution
+Failed to start systemd-resolved.service: Unit systemd-resolved.service not found.
+time="2026-11-22T04:32:53-05:00" level=warning msg="treating lima version `<unknown>` from `l/w/lima-version` as very latest release"
+DNS=192.168.5.2
+sudo: unable to resolve host lima-w: Temporary failure in name resolution
+sudo: unable to resolve host lima-w: Temporary failure in name resolution
+nameserver 192.168.5.3
+nameserver 1.1.1.1
+32.204.0.172    STREAM registry-1.docker.io
+32.204.0.172    DGRAM  
+32.204.0.172    RAW    
+54.211.250.45   STREAM 
+54.211.250.45   DGRAM  
+54.211.250.45   RAW    
+100.57.12.114   STREAM 
+100.57.12.114   DGRAM  
+100.57.12.114   RAW    
+52.2.152.130    STREAM 
+52.2.152.130    DGRAM  
+52.2.152.130    RAW    
+184.197.245.234 STREAM 
+184.197.245.234 DGRAM  
+184.197.245.234 RAW    
+100.30.208.234  STREAM 
+100.30.208.234  DGRAM  
+100.30.208.234  RAW    
+52.20.61.205    STREAM 
+52.20.61.205    DGRAM  
+52.20.61.205    RAW    
+34.238.129.170  STREAM 
+34.238.129.170  DGRAM  
+34.238.129.170  RAW    

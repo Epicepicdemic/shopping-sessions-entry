@@ -1,0 +1,92 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.17kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 131B done
+#3 DONE 0.0s
+
+#4 [toolchain 1/2] FROM docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
+#4 resolve docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 0.0s done
+#4 CACHED
+
+#5 [internal] load build context
+#5 transferring context: 135.13kB done
+#5 DONE 0.0s
+
+#6 [allocator 1/2] ADD --checksum=sha256:8e0ed89907a681276bff2e49e9a048b47ba51254ab60daf6b3c220acac456a95     https://codeload.github.com/microsoft/mimalloc/tar.gz/refs/tags/v2.2.7 /tmp/mimalloc.tar.gz
+#6 DONE 5.7s
+
+#7 [toolchain 2/2] RUN apk add --no-cache build-base=0.5-r3 gcc=15.2.0-r2 g++=15.2.0-r2 musl-dev=1.2.5-r24 binutils=2.45.1-r0
+#7 3.052 ( 1/21) Installing libgcc (15.2.0-r2)
+#7 3.195 ( 2/21) Installing jansson (2.14.1-r0)
+#7 3.427 ( 3/21) Installing libstdc++ (15.2.0-r2)
+#7 5.147 ( 4/21) Installing zstd-libs (1.5.7-r2)
+#7 5.799 ( 5/21) Installing binutils (2.45.1-r0)
+#7 11.03 ( 6/21) Installing libmagic (5.46-r2)
+#7 11.52 ( 7/21) Installing file (5.46-r2)
+#7 11.54 ( 8/21) Installing libgomp (15.2.0-r2)
+#7 11.74 ( 9/21) Installing libatomic (15.2.0-r2)
+#7 11.77 (10/21) Installing gmp (6.3.0-r4)
+#7 11.99 (11/21) Installing isl26 (0.26-r1)
+#7 12.77 (12/21) Installing mpfr4 (4.2.2-r0)
+#7 13.05 (13/21) Installing mpc1 (1.3.1-r1)
+#7 13.10 (14/21) Installing gcc (15.2.0-r2)
+#7 84.28 (15/21) Installing libstdc++-dev (15.2.0-r2)
+#7 87.42 (16/21) Installing musl-dev (1.2.5-r24)
+#7 90.89 (17/21) Installing g++ (15.2.0-r2)
+#7 109.6 (18/21) Installing make (4.4.1-r3)
+#7 109.7 (19/21) Installing fortify-headers (1.1-r5)
+#7 109.8 (20/21) Installing patch (2.8-r0)
+#7 109.9 (21/21) Installing build-base (0.5-r3)
+#7 109.9 Executing busybox-1.37.0-r30.trigger
+#7 109.9 OK: 275.2 MiB in 37 packages
+#7 DONE 110.0s
+
+#8 [allocator 1/2] ADD --checksum=sha256:8e0ed89907a681276bff2e49e9a048b47ba51254ab60daf6b3c220acac456a95     https://codeload.github.com/microsoft/mimalloc/tar.gz/refs/tags/v2.2.7 /tmp/mimalloc.tar.gz
+#8 DONE 0.0s
+
+#9 [allocator 2/2] RUN mkdir /mimalloc && tar -xzf /tmp/mimalloc.tar.gz --strip-components=1 -C /mimalloc     && gcc -O3 -DNDEBUG -march=x86-64-v2 -DMI_STATIC_LIB -DMI_MALLOC_OVERRIDE -DMI_LIBC_MUSL=1        -fno-builtin-malloc -ftls-model=local-dynamic -pthread -I/mimalloc/include -I/mimalloc/src        -c /mimalloc/src/static.c -o /mimalloc.o
+#9 DONE 5.3s
+
+#10 [build 1/4] WORKDIR /src
+#10 DONE 0.0s
+
+#11 [build 2/4] COPY proto/src/ .
+#11 DONE 0.0s
+
+#12 [build 3/4] COPY proto/tools/build-linux.sh .
+#12 DONE 0.0s
+
+#13 [build 4/4] RUN sh build-linux.sh /shopping-w5 /mimalloc.o     && strip --strip-debug /shopping-w5
+#13 3.493 main.cpp: In function 'int shopping_v4(int, char**)':
+#13 3.493 main.cpp:971:1: warning: control reaches end of non-void function [-Wreturn-type]
+#13 3.493   971 | }
+#13 3.493       | ^
+#13 3.510 main.cpp: In function 'int shopping_v3(int, char**)':
+#13 3.510 main.cpp:971:1: warning: control reaches end of non-void function [-Wreturn-type]
+#13 3.510   971 | }
+#13 3.510       | ^
+#13 3.579 main.cpp: In function 'int shopping_v2(int, char**)':
+#13 3.579 main.cpp:971:1: warning: control reaches end of non-void function [-Wreturn-type]
+#13 3.579   971 | }
+#13 3.579       | ^
+#13 DONE 15.5s
+
+#14 [stage-3 1/2] COPY --from=build /shopping-w5 /app/shopping-w5
+#14 DONE 0.0s
+
+#15 [stage-3 2/2] COPY --from=allocator /mimalloc/LICENSE /licenses/mimalloc.txt
+#15 DONE 0.0s
+
+#16 exporting to image
+#16 exporting layers 0.1s done
+#16 exporting manifest sha256:3b78e8e3b60a2e5809c723487cd9a1770a9ce636416c0aa1681c7599d1699419 done
+#16 exporting config sha256:55b5021cf81be72a187d93d228f1c10cbf336444440ca43066f7f490810a9f0e done
+#16 naming to docker.io/library/shopping-w5:tuning done
+#16 DONE 0.1s

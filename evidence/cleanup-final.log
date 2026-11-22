@@ -1,0 +1,4 @@
+Generated CSV and Parquet files remaining in shopping-w5: 0
+Isolated test VM and temporary outputs removed.
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   926Gi    13Gi    21Gi    39%    487k  217M    0%   /

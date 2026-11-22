@@ -1,0 +1,14 @@
+window 1835222400000 .. 1836432000000 ms; 2 products; 3 campaigns
+5 usable link lines; 6 linked IDs; 2 linked people
+12 distinct event_ids
+  click copies beyond the first: 1
+  click lines: 7
+  clicks invalid: 1
+  clicks valid: 5
+  event copies beyond the first: 2
+  event lines: 15
+  event lines malformed: 1
+  events invalid: 2
+  events surviving: 10
+  sessions: 6
+wrote 6 user_daily rows and 4 campaign_daily rows

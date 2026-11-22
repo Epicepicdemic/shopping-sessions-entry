@@ -1,0 +1,63 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from clang.Dockerfile
+#1 transferring dockerfile: 436B 0.0s done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/shopping-w5:allocator
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 131B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 84.82kB done
+#4 DONE 0.0s
+
+#5 [build 1/6] FROM docker.io/library/shopping-w5:allocator@sha256:f757adc1e97b3194246bf57f9f7127ef4dd7110a411cc6a61186ef4898cc4ef6
+#5 resolve docker.io/library/shopping-w5:allocator@sha256:f757adc1e97b3194246bf57f9f7127ef4dd7110a411cc6a61186ef4898cc4ef6 0.0s done
+#5 DONE 0.0s
+
+#6 [build 2/6] RUN apk add --no-cache clang lld
+#6 1.043 ( 1/11) Installing clang21-headers (21.1.2-r2)
+#6 1.258 ( 2/11) Installing libffi (3.5.2-r0)
+#6 1.288 ( 3/11) Installing xz-libs (5.8.4-r0)
+#6 1.337 ( 4/11) Installing libxml2 (2.13.9-r1)
+#6 1.541 ( 5/11) Installing llvm21-libs (21.1.2-r1)
+#6 49.39 ( 6/11) Installing clang21-libs (21.1.2-r2)
+#6 76.98 ( 7/11) Installing llvm21-linker-tools (21.1.2-r1)
+#6 77.08 ( 8/11) Installing clang21 (21.1.2-r2)
+#6 77.81 ( 9/11) Installing lld21-libs (21.1.2-r1)
+#6 79.75 (10/11) Installing scudo-malloc (21.1.2-r0)
+#6 79.83 (11/11) Installing lld21 (21.1.2-r1)
+#6 79.87 Executing busybox-1.37.0-r30.trigger
+#6 79.94 OK: 559.2 MiB in 48 packages
+#6 DONE 80.2s
+
+#7 [build 3/6] WORKDIR /src
+#7 DONE 0.1s
+
+#8 [build 4/6] COPY proto/src/ .
+#8 DONE 0.1s
+
+#9 [build 5/6] COPY proto/tools/build-linux.sh .
+#9 DONE 0.1s
+
+#10 [build 6/6] RUN sh build-linux.sh /shopping-w5 /mimalloc.o
+#10 0.859 clang++: warning: argument unused during compilation: '-fuse-ld=lld' [-Wunused-command-line-argument]
+#10 1.005 clang++: warning: argument unused during compilation: '-fuse-ld=lld' [-Wunused-command-line-argument]
+#10 1.005 clang++: warning: argument unused during compilation: '-fuse-ld=lld' [-Wunused-command-line-argument]
+#10 33.57 clang++: warning: argument unused during compilation: '-fuse-ld=lld' [-Wunused-command-line-argument]
+#10 DONE 53.3s
+
+#11 [stage-1 1/1] COPY --from=build /shopping-w5 /app/shopping-w5
+#11 DONE 0.0s
+
+#12 exporting to image
+#12 exporting layers
+#12 exporting layers 0.2s done
+#12 exporting manifest sha256:29d3d4f811c52dcb958064d7661b599c63a789789d6360bd0b7ac548cc963fc9 done
+#12 exporting config sha256:8070f7167d941c9923b43640728fffb03fd8a0861add62d1f326f7d00f4323cd done
+#12 naming to docker.io/library/shopping-w5:clang done
+#12 DONE 0.2s

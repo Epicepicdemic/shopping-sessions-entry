@@ -1,0 +1,2 @@
+time="2026-11-22T04:27:44-05:00" level=warning msg="treating lima version `<unknown>` from `l/w/lima-version` as very latest release"
+sudo: unable to resolve host lima-w: Temporary failure in name resolution

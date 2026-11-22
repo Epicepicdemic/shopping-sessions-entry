@@ -1,0 +1,21 @@
+bin/shopping-w5-linux-x86_64: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, BuildID[sha1]=b5f44fc81c0f8506f067468d3b52c068b0471380, not stripped
+c30566094c95586b04e5854c8421dbd5abcd0249eb4f48f4006dd726dd99e446  bin/shopping-w5-linux-x86_64
+  Type:                              DYN (Shared object file)
+  Machine:                           Advanced Micro Devices X86-64
+PT_INTERP count=0, DT_NEEDED count=0
+0000000000042c90 T free
+0000000000042c90 T mi_free
+0000000000044cc0 T mi_realloc
+0000000000044cc0 T realloc
+0000000000046c10 T aligned_alloc
+0000000000046df0 T mi_aligned_alloc
+00000000000478f0 T malloc
+00000000000478f0 T mi_malloc
+0000000000047c50 T _Znwm
+0000000000047cf0 T calloc
+0000000000047cf0 T mi_calloc
+000000000005d6c0 t shopping_v2
+000000000009f5d0 t shopping_v3
+00000000000e1d90 t shopping_v4
+linux/amd64 user=1000:1000 image=sha256:c2324d4b99653c1f372060aa59b3466be4b3a272632bd491a92bdbceed7f4714
+0000000000047c50 T mi_new

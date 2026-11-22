@@ -1,0 +1,3 @@
+always [madvise] never
+always defer defer+madvise [madvise] never
+MemTotal:       12220976 kB

@@ -1,0 +1,9 @@
+g++ policy:
+  15.2.0-r2:
+    https://dl-cdn.alpinelinux.org/alpine/v3.23/main
+gcc policy:
+  15.2.0-r2:
+    https://dl-cdn.alpinelinux.org/alpine/v3.23/main
+musl-dev policy:
+  1.2.5-r24:
+    https://dl-cdn.alpinelinux.org/alpine/v3.23/main

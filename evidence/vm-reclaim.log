@@ -1,0 +1,93 @@
+Untagged: shopping-w5:clang
+Deleted: sha256:29d3d4f811c52dcb958064d7661b599c63a789789d6360bd0b7ac548cc963fc9
+Untagged: shopping-w5:rtti
+Deleted: sha256:e8c0f97d63462da5780556fbb51c6d2b482425374d1091b0d8ddfa3d1988e8a3
+Untagged: shopping-w5:bare
+Deleted: sha256:3b39f6a6ca864486518287f86e55ec1854442477d9c5a511c1ca729afec56609
+Untagged: shopping-w5:pgo
+Deleted: sha256:a1d87d0635034fc478c13a4f172b9779e036344049fe0d245f8987dac4bd6839
+Untagged: shopping-w5:sanitized
+Deleted: sha256:2ce45c222304efcd9b8f1bf0a8f40e031a38c9d3f1bcbed58d4003c597114d14
+Untagged: shopping-w5:allocator
+Deleted: sha256:f757adc1e97b3194246bf57f9f7127ef4dd7110a411cc6a61186ef4898cc4ef6
+Untagged: shopping-w5:tuning
+Deleted: sha256:3b78e8e3b60a2e5809c723487cd9a1770a9ce636416c0aa1681c7599d1699419
+Untagged: shopping-w5:final
+Deleted: sha256:f4ab45920ebb2d818760dd45e5101b4ce1082c325550744f1cd8bee0969470fa
+Untagged: shopping-w5:prototype
+Deleted: sha256:60b32c74819c225146f7c9c75ab119d1e61c0f2f1bfddceff74581048b7e2b44
+Untagged: alpine:3.23
+Deleted: sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
+ID						RECLAIMABLE	SIZE		LAST ACCESSED
+y4zkr1xba3nfm5d3h5ygjxf6e*              	true 		8.192kB   	5 minutes ago
+mqnjt3uxwf1mq4faquzmrcxo9*              	true 	1.626MB   	34 minutes ago
+cjsz3j1l1s7yozs5z6rnhvnbu               	true 	13.1kB    	6 minutes ago
+cfi3j3xv7b5mhqryum0esf5ep               	true 	5.011MB   	4 minutes ago
+ucinxuyiodt3oys4bile3jags*              	true 	2.142MB   	26 minutes ago
+wzuu0ixes1h63wbh323d7tosv*              	true 	10.83MB   	14 minutes ago
+xo9t787nzmuei9s5q9ih42i8z               	true 	9.475MB   	4 minutes ago
+oh07pu5nsj4auptday1uveqpk*              	true 	5.534MB   	4 minutes ago
+imo0n3cu3l7vk0ssuopdcdedp*              	true 	4.096kB   	4 minutes ago
+hkehqnchzj5j6yt23irbfi6zd               	true 	5.044MB   	4 minutes ago
+t9ne7pb50mr5v0wwrypa4j9w5*              	true 	1.303MB   	17 minutes ago
+3my8ruphlppt2eu8sjwp8b7yt               	true 	13.11kB   	17 minutes ago
+eraqonuyaah1uxbb0ko8m7n3w               	true 	196.6kB   	4 minutes ago
+5fs6r54e6opgtwg7hcey2ui6k*              	true 	10.78MB   	17 minutes ago
+wl1qwnfnrcd19dxom29v9dy87*              	true 	8.192kB   	4 minutes ago
+pp89kublcxcxegfb5a3zbswme               	true 	147.5kB   	26 minutes ago
+g6lh1eudnyhx9rohuj3km5gkn               	true 	5.385MB   	5 minutes ago
+v4wnukhrz1as5swokzk1j8kzu*              	true 	8.192kB   	4 minutes ago
+xs3ujrqfbvlj2ixhoujp1sys9*              	true 	8.192kB   	5 minutes ago
+pgmb6l4o6h3ck2z01mp40kpv4               	true 	12.29kB   	14 minutes ago
+m25ati4xwydbfj0rs9dv4j03d               	true 	4.321MB   	17 minutes ago
+x6wyvm85zn4cicapn65yai2w0               	true 	159.7kB   	14 minutes ago
+jcjd6dlmkvx9mgn8htnaiygnk               	true 	12.29kB   	17 minutes ago
+tkpnzh9kp882covw2tz3jh1dp*              	true 	10.87MB   	6 minutes ago
+8n6mihhlt9bj3qppe35oqhp5a               	true 	13.1kB    	14 minutes ago
+c7jn17wauhpkcotep5w5hlc9c               	true 	4.375MB   	6 minutes ago
+t2a31o239hu6bv3svfuiig8u1*              	true 	163.8kB   	4 minutes ago
+kkaugo4tkr7smb8mmhtayrhie*              	true 	8.192kB   	4 minutes ago
+zr80k008bgpshs4fl7gco0ozx*              	true 	172kB     	5 minutes ago
+81rs54glnv2z9ykyn9ilq5jjn*              	true 	20.9MB    	4 minutes ago
+j9ixsr50dva9v4jlzpsaetabw*              	true 	4.096kB   	34 minutes ago
+tugxyqtx9a92ph85omwco80xi*              	true 	8.192kB   	34 minutes ago
+xt2mnbs97wr1323wza4rgh1qb               	true 	2.301MB   	34 minutes ago
+zk975yjt9nclohlrxfjreg5ze*              	true 	8.192kB   	4 minutes ago
+ufuwwyj831wtlzehy4i1b2wfo*              	true 	11.45MB   	5 minutes ago
+txft0j1ssvn6cvghblb863jeb               	true 	5.173MB   	5 minutes ago
+xk0x3lfjytktda2in6bcsd7qq*              	true 	11.65MB   	5 minutes ago
+mbsu281vrk0xfc7muso4hy0y0*              	true 	5.89MB    	4 minutes ago
+zq5pad3pmc8r7zamjcjb7fxx4               	true 	8.284kB   	4 minutes ago
+qek9bk34tc9keoltaw26fsz42*              	true 	172kB     	4 minutes ago
+mo2z78dua4nlrax8hqvhfbzmm               	true 	5.73MB    	4 minutes ago
+zkc33y9t57djdqpdm11088bny               	true 	317.7MB   	4 minutes ago
+vuhv8kzqr3mp0x1j0fe7z0pae               	true 	12.29kB   	6 minutes ago
+mb2h49ymgdydemecpd270kfuu               	true 	12.29kB   	4 minutes ago
+sn0v5kcw9r7k2pe2tjnosnyop               	true 	2.924MB   	26 minutes ago
+fzt0gxrqns0z5s4t98slr6o1n*              	true 	8.192kB   	4 minutes ago
+jms73ixh7ixwptipren9a7wyh               	true 	12.29kB   	5 minutes ago
+j7ltgn2k6qe3tjub8mwliemb3               	true 	12.29kB   	5 minutes ago
+cfmf7a1gba1azddps5fppj3xt               	true 	4.351MB   	14 minutes ago
+ccvc0qmf4k6ahvoayfr2ivxy5               	true 	159.7kB   	17 minutes ago
+ynr3q1jhaunf7n04p3fba8ig6               	true 	159.7kB   	6 minutes ago
+xs031w4f29yyy1av0f4jb2bml               	true 	8.192kB   	26 minutes ago
+b0cdexgbihrf3i1y4lpxkjv28               	true 	163.8kB   	4 minutes ago
+vdwroeq74q5l0jq968h61xyt9               	true 	159.7kB   	5 minutes ago
+xoi9d96828fnfozow16aqnqmd               	true 	159.7kB   	4 minutes ago
+ucli5kiqmejq3p0iwq3539sdb               	true 	135.9MB   	4 minutes ago
+z5mel7bqv9pi6litmnywew78l               	true 	159.7kB   	5 minutes ago
+ltkhl6935rq7f44fn0mfzteln               	true 	8.192kB   	4 minutes ago
+0codlmtfy5jignezox3bhrggk               	true 	8.192kB   	4 minutes ago
+46t2nbtc2z7ij0pykmphj4ixo               	true 	8.192kB   	6 minutes ago
+3oy2vkprkq35jjt2kxeibcs2s               	true 	285.3MB   	26 minutes ago
+o6v6nkpk0ldon2i46nyavx0x7               	true 	298.8MB   	4 minutes ago
+kwuikwl339fytps1oku1ameqh               	true 	7.623MB   	4 minutes ago
+vx2kim4hpqjdb5yrsuvuumkuj               	true 	2.599MB   	6 minutes ago
+ekpuz598bpmibmld1xypjtbx7               	true 	384.1MB   	6 minutes ago
+bcrk9vbqa8epx92zf7cqleq2u               	true 	3.853MB   	6 minutes ago
+Total:	1.585GB
+time="2026-11-22T05:04:21-05:00" level=warning msg="treating lima version `<unknown>` from `l/w/lima-version` as very latest release"
+sudo: unable to resolve host lima-w: Name or service not known
+/: 7.7 GiB (8283148288 bytes) trimmed
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   926Gi    13Gi   3.4Gi    80%    487k   35M    1%   /

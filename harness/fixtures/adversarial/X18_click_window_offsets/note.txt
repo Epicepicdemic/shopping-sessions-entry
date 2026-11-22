@@ -1,1 +1,0 @@
-Timestamps: "A click's `ts` must satisfy `window_start - 7 days <= ts < window_end` ... A click at exactly `window_start - 7 days` is in its window".

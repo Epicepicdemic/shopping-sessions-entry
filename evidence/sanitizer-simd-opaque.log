@@ -1,0 +1,6 @@
+w5 isa=native scanner=neon workers=8 event_bits=6 user_bits=5 time=compact sync=0 input_bytes=602314 user_rows=6 campaign_rows=4 peak_rss_bytes=26968064 minor_faults=2407 major_faults=219
+w5_ms setup=5.066 scan=0.538 dedup=0.100 links=0.084 group=0.104 reduce_write=0.484 campaign_write=0.278 total=6.654
+w5_worker_ms reduce=0.105 write=0.338
+user_daily: MATCH rows 6 (expected 6), missing 0, extra 0, differing 0, duplicate keys 0, expected duplicate keys 0
+campaign_daily: MATCH rows 4 (expected 4), missing 0, extra 0, differing 0, duplicate keys 0, expected duplicate keys 0
+sessions user/campaign 6/6, revenue 6488/6488, assists 3, credited non-organic sessions 2

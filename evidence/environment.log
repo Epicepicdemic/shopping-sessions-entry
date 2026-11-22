@@ -1,0 +1,13 @@
+Apple M5 Pro
+hw.perflevel0.logicalcpu: 5
+hw.perflevel1.logicalcpu: 10
+hw.memsize: 25769803776
+Apple clang version 21.0.0 (clang-2100.4.1.1)
+Target: arm64-apple-darwin27.2.0
+Thread model: posix
+749988645da0b7d92c7446cfb023a4b9a49f36d0c854ba5d79609c6c3133b10d  work/bin/w4-native
+a5ee46c84638ab705fd97f5d3c9e5823721a008a7a217628adb3915de70c890b  work/bin/w5-final-native
+63fba27100e92854dc2c9f0e966614f7d1b06b23751f63c044a09e9fc85fb38f  work/bin/generate
+3ec43a7d09f0d8fb3086bdc990fce01e1ef309fb3353aa7387495a4031440c52  work/bin/rust-control
+Wave-4 native baseline rebuilt from the read-only Wave-4 sources with the same optimization flags.
+Official kit generator seeds: dev 1, 20M 2005, 60M 6005.

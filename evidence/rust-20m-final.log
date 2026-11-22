@@ -1,0 +1,21 @@
+link_ms=293.484
+scanner=neon build=portable
+timing_ms: catalog=6.9 fast_prep=3.2 ev_scan_and_links=2446.4 classify=0.0 ev_dedup=385.6 fast_dedup=0.0 cl_scan=523.0 click_route=0.0 fast_sessions=0.0 sessions_and_user_write=131.7 cleanup_and_campaign_write=4.3 total=3501.3 fast=off fast_people=0 qb=15 l2=unknown siblings=1
+        3.58 real         6.88 user         4.85 sys
+          4530503680  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              349362  page reclaims
+              126498  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  13  voluntary context switches
+              299724  involuntary context switches
+         61165432729  instructions retired
+         49728057599  cycles elapsed
+          3192525528  peak memory footprint

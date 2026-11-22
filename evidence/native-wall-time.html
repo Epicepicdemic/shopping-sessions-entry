@@ -1,0 +1,18 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Paired native wall time</title><style>
+body{margin:0;color:var(--foreground);font:14px var(--font-sans, system-ui)} main{display:grid;gap:14px} h2{font-size:15px;margin:0;font-weight:650} .legend,.rowtitle{display:flex;gap:12px;align-items:center} .legend{font-size:12px;color:var(--muted-foreground)} .legend span{display:flex;align-items:center;gap:5px} .legend i{width:11px;height:8px;border-radius:2px} .w4{background:var(--chart-2,#8a96ae)} .w5{background:var(--chart-1,#568afd)} .legend .mark{width:9px;height:9px;border-left:1px dashed var(--foreground);border-radius:0} section{display:grid;gap:7px} .rowtitle{justify-content:space-between} .rowtitle span{font-size:12px;color:var(--muted-foreground)} .plot{display:grid;grid-template-columns:minmax(0,1fr) 75px;column-gap:8px;row-gap:5px;align-items:center;font:12px var(--font-mono, monospace);font-variant-numeric:tabular-nums} .track{height:12px;position:relative;background:var(--secondary);border-radius:2px} .track::after{content:"";position:absolute;left:var(--target);top:-1px;bottom:-1px;border-left:1px dashed var(--foreground);opacity:.85} .bar{height:12px;border-radius:2px} .plot span{text-align:right}
+</style><main><h2>Paired native wall time on Apple M5 Pro</h2><div class="legend"><span><i class="w4"></i>Wave-4</span><span><i class="w5"></i>Wave-5</span><span><i class="mark"></i>Target</span><span>Scale per dataset</span></div><section aria-label="Dev, target 0.040 seconds met">
+<div class="rowtitle"><strong>Dev</strong><span>Target &lt; 0.040 s · met</span></div>
+<div class="plot" style="--target:96.154%">
+<div class="track"><div class="bar w4" style="width:88.881%"></div></div><span>0.0370 s</span>
+<div class="track"><div class="bar w5" style="width:87.791%"></div></div><span>0.0365 s</span>
+</div></section><section aria-label="20M events, target 0.340 seconds missed">
+<div class="rowtitle"><strong>20M events</strong><span>Target &lt; 0.340 s · missed</span></div>
+<div class="plot" style="--target:64.241%">
+<div class="track"><div class="bar w4" style="width:96.154%"></div></div><span>0.5089 s</span>
+<div class="track"><div class="bar w5" style="width:93.557%"></div></div><span>0.4952 s</span>
+</div></section><section aria-label="60M events, target 1.250 seconds missed">
+<div class="rowtitle"><strong>60M events</strong><span>Target &lt; 1.250 s · missed</span></div>
+<div class="plot" style="--target:46.126%">
+<div class="track"><div class="bar w4" style="width:96.154%"></div></div><span>2.6057 s</span>
+<div class="track"><div class="bar w5" style="width:93.347%"></div></div><span>2.5297 s</span>
+</div></section></main></html>

@@ -1,0 +1,60 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.17kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 131B done
+#3 DONE 0.0s
+
+#4 [allocator 1/2] ADD --checksum=sha256:8e0ed89907a681276bff2e49e9a048b47ba51254ab60daf6b3c220acac456a95     https://codeload.github.com/microsoft/mimalloc/tar.gz/refs/tags/v2.2.7 /tmp/mimalloc.tar.gz
+#4 DONE 0.0s
+
+#5 [toolchain 1/2] FROM docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
+#5 resolve docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 67.35kB done
+#6 DONE 0.0s
+
+#7 [allocator 2/2] RUN mkdir /mimalloc && tar -xzf /tmp/mimalloc.tar.gz --strip-components=1 -C /mimalloc     && gcc -O3 -DNDEBUG -march=x86-64-v2 -DMI_STATIC_LIB -DMI_MALLOC_OVERRIDE -DMI_LIBC_MUSL=1        -fno-builtin-malloc -ftls-model=local-dynamic -pthread -I/mimalloc/include -I/mimalloc/src        -c /mimalloc/src/static.c -o /mimalloc.o
+#7 CACHED
+
+#8 [allocator 1/2] ADD --checksum=sha256:8e0ed89907a681276bff2e49e9a048b47ba51254ab60daf6b3c220acac456a95     https://codeload.github.com/microsoft/mimalloc/tar.gz/refs/tags/v2.2.7 /tmp/mimalloc.tar.gz
+#8 CACHED
+
+#9 [toolchain 2/2] RUN apk add --no-cache build-base=0.5-r3 gcc=15.2.0-r2 g++=15.2.0-r2 musl-dev=1.2.5-r24 binutils=2.45.1-r0
+#9 CACHED
+
+#10 [build 1/4] WORKDIR /src
+#10 CACHED
+
+#11 [build 2/4] COPY proto/src/ .
+#11 DONE 0.0s
+
+#12 [build 3/4] COPY proto/tools/build-linux.sh .
+#12 DONE 0.0s
+
+#13 [build 4/4] RUN sh build-linux.sh /shopping-w5 /mimalloc.o     && strip --strip-debug /shopping-w5
+#13 DONE 12.3s
+
+#7 [allocator 2/2] RUN mkdir /mimalloc && tar -xzf /tmp/mimalloc.tar.gz --strip-components=1 -C /mimalloc     && gcc -O3 -DNDEBUG -march=x86-64-v2 -DMI_STATIC_LIB -DMI_MALLOC_OVERRIDE -DMI_LIBC_MUSL=1        -fno-builtin-malloc -ftls-model=local-dynamic -pthread -I/mimalloc/include -I/mimalloc/src        -c /mimalloc/src/static.c -o /mimalloc.o
+#7 CACHED
+
+#14 [stage-3 1/2] COPY --from=build /shopping-w5 /app/shopping-w5
+#14 DONE 0.0s
+
+#15 [stage-3 2/2] COPY --from=allocator /mimalloc/LICENSE /licenses/mimalloc.txt
+#15 DONE 0.0s
+
+#16 exporting to image
+#16 exporting layers 0.1s done
+#16 exporting manifest sha256:f4ab45920ebb2d818760dd45e5101b4ce1082c325550744f1cd8bee0969470fa done
+#16 exporting config sha256:9d22dd160e0195be24cc24abc2f4f5e3e94d49152e5a958adf25394002506d80 done
+#16 naming to docker.io/library/shopping-w5:final done
+#16 DONE 0.1s

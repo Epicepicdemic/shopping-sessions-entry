@@ -1,0 +1,19 @@
+Byte-oriented spelling counts from up to the first 2,048 physical rows per shard.
+dev events column=0 rows=59392 literal=52132 packed_hex=7239 indirect_10_15=10 other=11 literal_pct=87.7761 packed_hex_pct=12.1885
+dev events column=1 rows=59390 literal=52049 packed_hex=7229 indirect_10_15=0 other=112 literal_pct=87.6393 packed_hex_pct=12.1721
+dev clicks column=0 rows=73954 literal=64564 packed_hex=9362 indirect_10_15=8 other=20 literal_pct=87.3029 packed_hex_pct=12.6592
+dev clicks column=1 rows=73945 literal=64747 packed_hex=9063 indirect_10_15=0 other=135 literal_pct=87.5610 packed_hex_pct=12.2564
+dev links column=0 rows=20651 literal=18061 packed_hex=2527 indirect_10_15=1 other=62 literal_pct=87.4582 packed_hex_pct=12.2367
+dev links column=1 rows=20648 literal=18111 packed_hex=2477 indirect_10_15=3 other=57 literal_pct=87.7131 packed_hex_pct=11.9963
+20m events column=0 rows=202752 literal=177353 packed_hex=25358 indirect_10_15=14 other=27 literal_pct=87.4729 packed_hex_pct=12.5069
+20m events column=1 rows=202739 literal=177261 packed_hex=25096 indirect_10_15=0 other=382 literal_pct=87.4331 packed_hex_pct=12.3785
+20m clicks column=0 rows=65536 literal=57321 packed_hex=8204 indirect_10_15=4 other=7 literal_pct=87.4649 packed_hex_pct=12.5183
+20m clicks column=1 rows=65533 literal=57228 packed_hex=8181 indirect_10_15=0 other=124 literal_pct=87.3270 packed_hex_pct=12.4838
+20m links column=0 rows=12288 literal=10767 packed_hex=1486 indirect_10_15=2 other=33 literal_pct=87.6221 packed_hex_pct=12.0931
+20m links column=1 rows=12286 literal=10727 packed_hex=1529 indirect_10_15=0 other=30 literal_pct=87.3108 packed_hex_pct=12.4451
+60m events column=0 rows=75776 literal=66400 packed_hex=9350 indirect_10_15=8 other=18 literal_pct=87.6267 packed_hex_pct=12.3390
+60m events column=1 rows=75766 literal=64967 packed_hex=10636 indirect_10_15=0 other=163 literal_pct=85.7469 packed_hex_pct=14.0380
+60m clicks column=0 rows=20480 literal=17875 packed_hex=2599 indirect_10_15=2 other=4 literal_pct=87.2803 packed_hex_pct=12.6904
+60m clicks column=1 rows=20477 literal=17737 packed_hex=2694 indirect_10_15=0 other=46 literal_pct=86.6191 packed_hex_pct=13.1562
+60m links column=0 rows=30720 literal=26825 packed_hex=3799 indirect_10_15=3 other=93 literal_pct=87.3210 packed_hex_pct=12.3665
+60m links column=1 rows=30714 literal=26798 packed_hex=3839 indirect_10_15=2 other=75 literal_pct=87.2501 packed_hex_pct=12.4992

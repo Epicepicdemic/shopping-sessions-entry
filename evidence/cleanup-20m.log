@@ -1,0 +1,3 @@
+20M input and retained outputs removed before 60M generation.
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   926Gi    13Gi    20Gi    39%    487k  211M    0%   /

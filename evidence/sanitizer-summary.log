@@ -1,0 +1,15 @@
+Combined ASan/UBSan on the opaque, wide and boundary inputs. SHOPPING_CLEAN_EXIT enabled.
+Apple Clang arm64: ASAN_OPTIONS=detect_leaks=0 (LeakSanitizer unavailable on this toolchain).
+Debian Linux arm64 GCC: ASAN_OPTIONS=detect_leaks=1:halt_on_error=1; UBSAN_OPTIONS=halt_on_error=1.
+macOS simd opaque: exit 0, both tables MATCH (sanitizer-simd-opaque.log)
+macOS simd wide: exit 0, both tables MATCH (sanitizer-simd-wide.log)
+macOS simd boundaries: exit 0, both tables MATCH (sanitizer-simd-boundaries.log)
+macOS scalar opaque: exit 0, both tables MATCH (sanitizer-scalar-opaque.log)
+macOS scalar wide: exit 0, both tables MATCH (sanitizer-scalar-wide.log)
+macOS scalar boundaries: exit 0, both tables MATCH (sanitizer-scalar-boundaries.log)
+Linux arm64 simd opaque: exit 0, both tables MATCH (linux-sanitizer-simd-opaque.log)
+Linux arm64 simd wide: exit 0, both tables MATCH (linux-sanitizer-simd-wide.log)
+Linux arm64 simd boundaries: exit 0, both tables MATCH (linux-sanitizer-simd-boundaries.log)
+Linux arm64 scalar opaque: exit 0, both tables MATCH (linux-sanitizer-scalar-opaque.log)
+Linux arm64 scalar wide: exit 0, both tables MATCH (linux-sanitizer-scalar-wide.log)
+Linux arm64 scalar boundaries: exit 0, both tables MATCH (linux-sanitizer-scalar-boundaries.log)
