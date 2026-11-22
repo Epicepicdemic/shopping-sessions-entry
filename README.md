@@ -18,7 +18,7 @@ The default run is `fast/src/opaque.rs`. It treats every ID as an opaque string 
 - **One pass over all input.** Links, events and clicks are read in parallel. Each user ID is interned into a dense index in a lock-free table; each link line joins its two indices in a concurrent union-find. Each event copy is filed under a bucket of its event key with its ingest time, user index and validated fields; each valid click is kept with its user index.
 - **Persons.** Each link component is a person named by its byte-wise smallest ID; every other ID is a person of its own.
 - **Dedup, then sessions.** Each event bucket keeps, per event ID, the copy with the smallest ingest time (dedup before validation), and files the surviving valid events by person. A bucket where two long event keys match compares the bytes of its long IDs. Each person bucket is then sessionized by the same code the exact solver uses (`fast/src/sink.rs`).
-- **Memory.** Records go to their buckets through cache-line staging with non-temporal stores, and each bucket's records are returned to the kernel by the thread that consumed them.
+- **Memory.** Records go to their buckets through cache-line staging with non-temporal stores.
 - **Limits.** A user table that fills up is discarded and the scan repeats with one four times larger. Other input outside the engine's limits (a window longer than 49 days, more than 256 categories, an ingest time more than 68 years from the window, colliding hashes, or two different long event IDs with the same key) makes it stop before writing anything, and the exact solver runs instead. `SHOPPING_OPAQUE=0` runs the exact solver alone.
 
 ## The generator, and the older fast path
@@ -71,7 +71,7 @@ Switches, for measurement:
 | `SHOPPING_OPQ_DEPTH=1`..`64` | User-table lookups in flight per scan thread (default 16). |
 | `SHOPPING_POPULATE=1` | Maps each input range in one call before scanning it (opaque engine). |
 | `SHOPPING_BLOCKSCAN=1` | Uses the block scanner (per-64-byte masks and one quote-parity pass) instead of the line splitter. |
-| `SHOPPING_DISCARD=0` | Keeps consumed buckets until exit instead of returning them to the kernel early. |
+| `SHOPPING_DISCARD=1` | Returns each consumed bucket to the kernel during the run instead of at exit. |
 | `SHOPPING_OPQ_SLOTS=16`..`30`, `SHOPPING_OPQ_EB=n`, `SHOPPING_OPQ_PB=n` | Force the user-table size (2^k slots), records per event bucket and events per person bucket (measurement). |
 | `SHOPPING_OPQ_COLLIDE=1` | Test hook: every long event ID gets one key, so the bucket check must hand the run to the exact solver. |
 | `SHOPPING_COMPACT_LINKS=0` | Builds the full exact link graph instead of the compact one (fast path only). |

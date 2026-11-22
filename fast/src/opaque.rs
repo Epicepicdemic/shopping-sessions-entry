@@ -122,8 +122,9 @@ fn populate_read(bytes: &[u8], first: usize, stop: usize) {
 }
 
 /// Give a consumed buffer's whole pages back to the kernel now, from the
-/// thread that consumed it, instead of all at exit (`SHOPPING_DISCARD=0`
-/// keeps them). Nothing reads the buffer afterwards, and it is never dropped.
+/// thread that consumed it, instead of all at exit (`SHOPPING_DISCARD=1`;
+/// off by default: the TLB shootdowns cost the run what exit saves). Nothing
+/// reads the buffer afterwards, and it is never dropped.
 fn discard<T>(v: &[T], cap: usize) {
     if !DISCARD.load(Ordering::Relaxed) {
         return;
@@ -139,7 +140,7 @@ fn discard<T>(v: &[T], cap: usize) {
     }
 }
 
-static DISCARD: AtomicBool = AtomicBool::new(true);
+static DISCARD: AtomicBool = AtomicBool::new(false);
 
 fn zeroed_u64(n: usize) -> Vec<AtomicU64> {
     let mut v: Vec<u64> = vec![0; n];
@@ -709,7 +710,7 @@ pub fn run(
     t_cat: std::time::Duration,
 ) -> Option<io::Result<()>> {
     COLLIDE.store(env::var("SHOPPING_OPQ_COLLIDE").ok().as_deref() == Some("1"), Ordering::Relaxed);
-    DISCARD.store(env::var("SHOPPING_DISCARD").ok().as_deref() != Some("0"), Ordering::Relaxed);
+    DISCARD.store(env::var("SHOPPING_DISCARD").ok().as_deref() == Some("1"), Ordering::Relaxed);
     let window_start = catalog.window_start;
     let window_end = catalog.window_end;
     if window_end.saturating_sub(window_start) > u32::MAX as i64 || catalog.categories.len() > 256 {
