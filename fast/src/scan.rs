@@ -18,6 +18,7 @@ use crate::parse::{find_newline, parse_csv_line};
 /// Zero bytes kept after the last owned line; at least one 128-byte window.
 pub const SLACK: usize = 192;
 /// Prefetch distance in bytes ahead of the current line.
+#[cfg(target_arch = "x86_64")]
 const PREFETCH: usize = 4096;
 const GROW: usize = 64 * 1024;
 
@@ -260,7 +261,7 @@ impl<'a, const N: usize> Rec<'a, N> {
 
 /// Call `f` with the fields of every well-formed line in `bytes[first..stop]`
 /// (malformed lines are skipped, exactly as `parse_csv_line` decides).
-/// `bytes` must extend `SLACK` zero bytes past `stop`.
+/// `bytes` must have `SLACK` readable bytes after `stop`.
 #[inline(always)]
 pub fn for_each_record<'a, const N: usize>(
     bytes: &'a [u8],
@@ -268,6 +269,9 @@ pub fn for_each_record<'a, const N: usize>(
     stop: usize,
     mut f: impl FnMut(&Rec<'a, N>),
 ) {
+    if first >= stop {
+        return;
+    }
     debug_assert!(bytes.len() >= stop + SLACK);
     if block_scan() {
         return for_each_record_blocks::<N>(bytes, first, stop, f);
@@ -281,10 +285,13 @@ pub fn for_each_record<'a, const N: usize>(
             use std::arch::x86_64::*;
             _mm_prefetch::<_MM_HINT_T0>(bytes.as_ptr().wrapping_add(pos + PREFETCH) as *const i8);
         }
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2", not(feature = "scalar")))]
+        #[cfg(all(
+            not(feature = "scalar"),
+            any(target_arch = "x86_64", all(target_arch = "aarch64", target_endian = "little"))
+        ))]
         {
-            // SAFETY: `pos < stop` and `SLACK >= 128` zero bytes follow `stop`.
-            if let Some(len) = unsafe { split_call::<N>(bytes, pos, &mut f) } {
+            // SAFETY: `pos < stop` and at least 128 bytes follow `stop`.
+            if let Some(len) = unsafe { split_call::<N>(bytes, pos, stop, &mut f) } {
                 pos += len + 1;
                 continue;
             }
@@ -328,21 +335,75 @@ thread_local! {
 
 /// Newline, comma and quote masks of the 64 bytes at `p` (bit i = byte i).
 /// SAFETY: 64 bytes at `p` must be readable.
-#[inline(always)]
+#[cfg_attr(
+    all(target_arch = "x86_64", target_feature = "avx512bw", not(feature = "scalar")),
+    target_feature(enable = "avx512bw")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", target_feature = "avx2", not(target_feature = "avx512bw"), not(feature = "scalar")),
+    target_feature(enable = "avx2")
+)]
+#[inline]
 unsafe fn block_masks(p: *const u8) -> (u64, u64, u64) {
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(feature = "scalar")))]
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512bw", not(feature = "scalar")))]
     unsafe {
         use std::arch::x86_64::*;
-        #[inline(always)]
-        unsafe fn mm(x: __m256i, c: __m256i) -> u64 {
-            unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, c)) as u32 as u64 }
-        }
-        let a = _mm256_loadu_si256(p as *const __m256i);
-        let b = _mm256_loadu_si256(p.add(32) as *const __m256i);
-        let nl = _mm256_set1_epi8(b'\n' as i8);
-        let cm = _mm256_set1_epi8(b',' as i8);
-        let qt = _mm256_set1_epi8(b'"' as i8);
-        return (mm(a, nl) | (mm(b, nl) << 32), mm(a, cm) | (mm(b, cm) << 32), mm(a, qt) | (mm(b, qt) << 32));
+        let v = _mm512_loadu_si512(p.cast());
+        return (
+            _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'\n' as i8)),
+            _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b',' as i8)),
+            _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'"' as i8)),
+        );
+    }
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(target_feature = "avx512bw"), not(feature = "scalar")))]
+    unsafe {
+        use std::arch::x86_64::*;
+        let a = _mm256_loadu_si256(p.cast());
+        let b = _mm256_loadu_si256(p.add(32).cast());
+        let mask = |byte: u8| {
+            let v = _mm256_set1_epi8(byte as i8);
+            let lo = _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, v)) as u32 as u64;
+            let hi = _mm256_movemask_epi8(_mm256_cmpeq_epi8(b, v)) as u32 as u64;
+            lo | (hi << 32)
+        };
+        return (mask(b'\n'), mask(b','), mask(b'"'));
+    }
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2"), not(feature = "scalar")))]
+    unsafe {
+        use std::arch::x86_64::*;
+        let a = _mm_loadu_si128(p.cast());
+        let b = _mm_loadu_si128(p.add(16).cast());
+        let c = _mm_loadu_si128(p.add(32).cast());
+        let d = _mm_loadu_si128(p.add(48).cast());
+        let mask = |byte: u8| {
+            let v = _mm_set1_epi8(byte as i8);
+            let m = |x| _mm_movemask_epi8(_mm_cmpeq_epi8(x, v)) as u64;
+            m(a) | (m(b) << 16) | (m(c) << 32) | (m(d) << 48)
+        };
+        return (mask(b'\n'), mask(b','), mask(b'"'));
+    }
+    #[cfg(all(target_arch = "aarch64", target_endian = "little", not(feature = "scalar")))]
+    unsafe {
+        use std::arch::aarch64::*;
+        let a = vld1q_u8(p);
+        let b = vld1q_u8(p.add(16));
+        let c = vld1q_u8(p.add(32));
+        let d = vld1q_u8(p.add(48));
+        let bits = vcreate_u8(0x8040_2010_0804_0201);
+        let weights = vcombine_u8(bits, bits);
+        let mask = |byte| {
+            let v = vdupq_n_u8(byte);
+            let a = vandq_u8(vceqq_u8(a, v), weights);
+            let b = vandq_u8(vceqq_u8(b, v), weights);
+            let c = vandq_u8(vceqq_u8(c, v), weights);
+            let d = vandq_u8(vceqq_u8(d, v), weights);
+            let pairs = vpaddq_u8(a, b);
+            let pairs_hi = vpaddq_u8(c, d);
+            let quads = vpaddq_u8(pairs, pairs_hi);
+            let octets = vpaddq_u8(quads, quads);
+            vgetq_lane_u64::<0>(vreinterpretq_u64_u8(octets))
+        };
+        return (mask(b'\n'), mask(b','), mask(b'"'));
     }
     #[allow(unreachable_code)]
     {
@@ -514,135 +575,75 @@ fn block_row<'a, const N: usize>(
     f(&Rec { line, ends });
 }
 
-/// Prefix XOR of a 128-bit mask given as halves: bit i is the XOR of bits
-/// 0..=i. With PCLMULQDQ, one carry-less multiply by all-ones per half.
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2", not(feature = "scalar")))]
+/// Inclusive quote parity in the two halves of a row.
+#[cfg(all(
+    not(feature = "scalar"),
+    any(target_arch = "x86_64", all(target_arch = "aarch64", target_endian = "little"))
+))]
 #[inline(always)]
 fn prefix_xor(lo: u64, hi: u64) -> u128 {
-    #[cfg(target_feature = "pclmulqdq")]
-    {
-        use std::arch::x86_64::*;
-        // SAFETY: pclmulqdq is enabled for this build.
-        unsafe {
-            let ones = _mm_set1_epi64x(-1);
-            let a = _mm_clmulepi64_si128::<0x00>(_mm_set_epi64x(0, lo as i64), ones);
-            let b = _mm_clmulepi64_si128::<0x00>(_mm_set_epi64x(0, hi as i64), ones);
-            let plo = _mm_cvtsi128_si64(a) as u64;
-            // The high half continues from the parity of the low half.
-            let phi = (_mm_cvtsi128_si64(b) as u64) ^ (0u64.wrapping_sub((lo.count_ones() & 1) as u64));
-            return (plo as u128) | ((phi as u128) << 64);
-        }
-    }
-    #[allow(unreachable_code)]
-    {
-        let mut inside = (lo as u128) | ((hi as u128) << 64);
-        inside ^= inside << 1;
-        inside ^= inside << 2;
-        inside ^= inside << 4;
-        inside ^= inside << 8;
-        inside ^= inside << 16;
-        inside ^= inside << 32;
-        inside ^= inside << 64;
-        inside
-    }
+    let plo = prefix_xor64(lo);
+    let phi = prefix_xor64(hi) ^ 0u64.wrapping_sub(plo >> 63);
+    plo as u128 | ((phi as u128) << 64)
 }
 
-/// Split the line at `pos` from one 128-byte window and call `f` with its
-/// fields if it is well formed (exactly as `parse_csv_line` decides). Returns
-/// the line length, or `None` when no newline lies in the window (then the
-/// general path handles the line). Masks stay in 64-bit halves; the 128-bit
-/// quote check runs only for lines that contain a quote.
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2", not(feature = "scalar")))]
+/// Split and validate a row in one or two blocks. The general path handles
+/// longer rows and lines with no final newline. Bytes beyond the owned range
+/// may come from the next chunk, and are never interpreted as part of a row.
+#[cfg(all(
+    not(feature = "scalar"),
+    any(target_arch = "x86_64", all(target_arch = "aarch64", target_endian = "little"))
+))]
 #[inline(always)]
 unsafe fn split_call<'a, const N: usize>(
     bytes: &'a [u8],
     pos: usize,
+    stop: usize,
     f: &mut impl FnMut(&Rec<'a, N>),
 ) -> Option<usize> {
-    use std::arch::x86_64::*;
     let p = unsafe { bytes.as_ptr().add(pos) };
-    #[cfg(target_feature = "avx512bw")]
-    let (nl0, nl1, c0, c1, q0, q1) = unsafe {
-        let a = _mm512_loadu_si512(p as *const _);
-        let b = _mm512_loadu_si512(p.add(64) as *const _);
-        let nlv = _mm512_set1_epi8(b'\n' as i8);
-        let cv = _mm512_set1_epi8(b',' as i8);
-        let qv = _mm512_set1_epi8(b'"' as i8);
-        (
-            _mm512_cmpeq_epi8_mask(a, nlv),
-            _mm512_cmpeq_epi8_mask(b, nlv),
-            _mm512_cmpeq_epi8_mask(a, cv),
-            _mm512_cmpeq_epi8_mask(b, cv),
-            _mm512_cmpeq_epi8_mask(a, qv),
-            _mm512_cmpeq_epi8_mask(b, qv),
-        )
-    };
-    #[cfg(not(target_feature = "avx512bw"))]
-    let (nl0, nl1, c0, c1, q0, q1) = unsafe {
-        let nlv = _mm256_set1_epi8(b'\n' as i8);
-        let cv = _mm256_set1_epi8(b',' as i8);
-        let qv = _mm256_set1_epi8(b'"' as i8);
-        let v: [__m256i; 4] = [
-            _mm256_loadu_si256(p as *const __m256i),
-            _mm256_loadu_si256(p.add(32) as *const __m256i),
-            _mm256_loadu_si256(p.add(64) as *const __m256i),
-            _mm256_loadu_si256(p.add(96) as *const __m256i),
-        ];
-        let m = |x: __m256i, c: __m256i| _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, c)) as u32 as u64;
-        (
-            m(v[0], nlv) | (m(v[1], nlv) << 32),
-            m(v[2], nlv) | (m(v[3], nlv) << 32),
-            m(v[0], cv) | (m(v[1], cv) << 32),
-            m(v[2], cv) | (m(v[3], cv) << 32),
-            m(v[0], qv) | (m(v[1], qv) << 32),
-            m(v[2], qv) | (m(v[3], qv) << 32),
-        )
-    };
-    let len = if nl0 != 0 {
-        nl0.trailing_zeros() as usize
-    } else if nl1 != 0 {
-        64 + nl1.trailing_zeros() as usize
+    let (nl0, mut c0, mut q0) = unsafe { block_masks(p) };
+    let (len, c1, q1) = if nl0 != 0 {
+        let len = nl0.trailing_zeros() as usize;
+        let keep = (1u64 << len) - 1;
+        c0 &= keep;
+        q0 &= keep;
+        (len, 0, 0)
     } else {
-        return None;
+        let (nl1, c1, q1) = unsafe { block_masks(p.add(64)) };
+        if nl1 == 0 {
+            return None;
+        }
+        let extra = nl1.trailing_zeros() as usize;
+        let keep = (1u64 << extra) - 1;
+        (64 + extra, c1 & keep, q1 & keep)
     };
-    // Keep only bits before the newline (bzhi with an index of 64 keeps all).
-    let (lo, hi) = (len.min(64) as u32, len.saturating_sub(64) as u32);
-    // SAFETY: bmi2 is enabled for this build (cfg above).
-    let (c0, c1) = unsafe { (_bzhi_u64(c0, lo), _bzhi_u64(c1, hi)) };
-    if (c0.count_ones() + c1.count_ones()) as usize != N - 1 {
+    if pos + len >= stop {
+        return None;
+    }
+    if len == 0 || (c0.count_ones() + c1.count_ones()) as usize != N - 1 {
         return Some(len);
     }
-    let (q0, q1) = unsafe { (_bzhi_u64(q0, lo), _bzhi_u64(q1, hi)) };
-    if q0 | q1 != 0 {
-        // Quotes are legal only as pairs around whole fields. With P the
-        // prefix XOR of the quote mask (set from an opening quote up to its
-        // closing quote): no comma may lie inside a pair, every opening quote
-        // must sit at a field start, every closing quote at a field end, and
-        // the count must be even.
-        let commas = (c0 as u128) | ((c1 as u128) << 64);
-        let quotes = (q0 as u128) | ((q1 as u128) << 64);
+    if (q0 | q1) != 0 {
+        let commas = c0 as u128 | ((c1 as u128) << 64);
+        let quotes = q0 as u128 | ((q1 as u128) << 64);
         let starts = (commas << 1) | 1;
         let ends = (commas >> 1) | (1u128 << (len - 1));
         let inside = prefix_xor(q0, q1);
         let bad = (inside & commas) | (quotes & inside & !starts) | (quotes & !inside & !ends);
-        if bad != 0 || (q0.count_ones() + q1.count_ones()) & 1 != 0 {
+        if bad != 0 || (inside >> len) & 1 != 0 {
             return Some(len);
         }
     }
     let line = unsafe { std::slice::from_raw_parts(p, len) };
     let mut ends = [len; N];
     let mut k = 0usize;
-    let mut m = c0;
-    while m != 0 {
-        ends[k] = m.trailing_zeros() as usize;
-        m &= m - 1;
-        k += 1;
-    }
-    let mut m = c1;
-    while m != 0 {
-        ends[k] = 64 + m.trailing_zeros() as usize;
-        m &= m - 1;
-        k += 1;
+    for (mut m, base) in [(c0, 0), (c1, 64)] {
+        while m != 0 {
+            ends[k] = base + m.trailing_zeros() as usize;
+            m &= m - 1;
+            k += 1;
+        }
     }
     f(&Rec { line, ends });
     Some(len)
@@ -678,7 +679,10 @@ mod tests {
         out
     }
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "bmi2", not(feature = "scalar")))]
+    #[cfg(all(
+        not(feature = "scalar"),
+        any(target_arch = "x86_64", all(target_arch = "aarch64", target_endian = "little"))
+    ))]
     #[test]
     fn prefix_xor_matches_shifts() {
         let mut rng = 0x1234_5678_9ABC_DEF1u64;
@@ -718,6 +722,25 @@ mod tests {
         }
         let long = [b"x".repeat(200), b",\"y\"\n\"a\",\"\"\n".to_vec()].concat();
         assert_eq!(records::<2>(&long), oracle::<2>(&long));
+    }
+
+    #[test]
+    fn splitter_respects_owned_end_with_nonzero_slack() {
+        for count in [0, 1, 60, 61, 62, 63, 64, 125, 126, 127, 128, 192] {
+            let row = format!("\"{}\",tail", "x".repeat(count));
+            for prefix in [0, 1, 13, 63] {
+                let mut storage = vec![b'x'; prefix];
+                storage.extend_from_slice(row.as_bytes());
+                let stop = storage.len();
+                storage.extend_from_slice(b"\nextra,row\n");
+                storage.resize(stop + SLACK, b',');
+                let mut got = Vec::new();
+                for_each_record::<2>(&storage, prefix, stop, |rec| {
+                    got.push(rec.fields().map(|field| field.to_vec()));
+                });
+                assert_eq!(got, [[vec![b'x'; count], b"tail".to_vec()]]);
+            }
+        }
     }
 
     fn block_records<const N: usize>(text: &[u8], tail: u8) -> Vec<Vec<Vec<u8>>> {

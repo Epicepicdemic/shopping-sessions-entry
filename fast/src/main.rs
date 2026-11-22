@@ -70,7 +70,18 @@ fn dispatch_cpu_build() {
         _ if env::var_os("SHOPPING_PORTABLE").is_some() => 0,
         _ => 3,
     };
-    let v3 = is_x86_feature_detected!("avx")
+    // The x86-64-v3/v4 targets also imply the x86-64-v2 baseline.
+    let lahf = {
+        use std::arch::x86_64::__cpuid;
+        __cpuid(0x8000_0000).eax >= 0x8000_0001
+            && __cpuid(0x8000_0001).ecx & 1 != 0
+    };
+    let v3 = lahf
+        && is_x86_feature_detected!("cmpxchg16b")
+        && is_x86_feature_detected!("sse3")
+        && is_x86_feature_detected!("ssse3")
+        && is_x86_feature_detected!("sse4.1")
+        && is_x86_feature_detected!("avx")
         && is_x86_feature_detected!("avx2")
         && is_x86_feature_detected!("bmi1")
         && is_x86_feature_detected!("bmi2")

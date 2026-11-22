@@ -1,7 +1,6 @@
 //! The opaque-ID engine (on unless `SHOPPING_OPAQUE=0`). IDs are values, never
-//! numbers: an ID of at most 10 characters from `[0-9A-Z_a-z]` is keyed by its
-//! exact packed form, and any other ID by a 64-bit hash whose bytes are compared
-//! whenever two keys match.
+//! numbers: short IDs use injective inline keys. Indirect IDs use a tagged
+//! hash whose original bytes are compared whenever two keys match.
 //!
 //! 1. One parallel pass reads links, events and clicks. Every user ID is
 //!    interned into a dense index `u` (a lock-free table); each link line joins
@@ -12,7 +11,7 @@
 //!    every other index is a person of its own. Persons get dense numbers `p`.
 //! 3. Each event bucket keeps, per event key, the copy with the smallest ingest
 //!    time (dedup before validation), and files the surviving valid events by
-//!    person. Matching long keys have their bytes compared afterwards.
+//!    person. Matching long keys have their original bytes compared in place.
 //! 4. Each person bucket is sorted by person and handed to the shared `Sink`.
 //!
 //! Anything outside the engine's limits (table capacity, record widths, a long
@@ -30,7 +29,7 @@ use std::time::Instant;
 use crate::id::{self, FallbackArena, PackedId, fxhash_bytes};
 use crate::parquet::{CampaignDailyRow, UserCols, write_campaign_daily_file, write_user_daily_cols};
 use crate::parse::{
-    CLICK_LOOKBACK_MS, DateCache, LATE_LIMIT_MS, MS_PER_DAY, parse_f1_cached, parse_purchase_price,
+    CLICK_LOOKBACK_MS, DateCache, LATE_LIMIT_MS, MS_PER_DAY, MS_PER_SECOND, parse_f1_seconds_cached, parse_purchase_price,
     parse_ts_cached,
 };
 use crate::scan;
@@ -38,8 +37,11 @@ use crate::sink::{CampAcc, Sink};
 use crate::{Catalog, SCAN_CHUNK};
 
 const LONG: u64 = 1 << 63;
+/// PackedId uses bits 0..60. Inline suffixes use bits 60..63 as a tag.
+const RAW_SUFFIX: u64 = 1 << 60;
 const FALLBACK: u64 = 1 << 63;
 const INVALID: u32 = u32::MAX;
+const FAILED_CLAIM: u64 = u64::MAX;
 /// Offsets in one long-ID arena (64 MiB each).
 const ARENA_BITS: u32 = 26;
 /// Records per event bucket the dedup table is sized for
@@ -66,10 +68,24 @@ fn mix64(mut h: u64) -> u64 {
     h
 }
 
-/// Key of a non-empty ID inside a scan buffer (16 readable bytes): the exact
-/// packed form, or `LONG` | a 63-bit hash of the bytes.
+/// Key of a non-empty ID inside a scan buffer (16 readable bytes). The
+/// common short IDs with a known prefix have an exact, bytewise suffix key.
+/// The other forms are an exact PackedId or a tagged 63-bit hash.
 #[inline(always)]
-fn id_key(bytes: &[u8]) -> u64 {
+fn id_key<const PREFIX: u8>(bytes: &[u8]) -> u64 {
+    if (bytes.len() == 9 || bytes.len() == 8) && bytes[0] == PREFIX {
+        let suffix = if bytes.len() == 9 {
+            u64::from_be_bytes(bytes[1..9].try_into().unwrap())
+        } else {
+            u64::from_be_bytes(bytes[..8].try_into().unwrap()) << 8
+        };
+        // The leading suffix byte leaves the PackedId and LONG tags disjoint.
+        // A zero last byte denotes the seven-byte suffix, so a nine-byte ID
+        // ending in NUL uses the general codec.
+        if (RAW_SUFFIX..LONG).contains(&suffix) && (suffix as u8 != 0 || bytes.len() == 8) {
+            return suffix;
+        }
+    }
     match id::try_pack_padded(bytes) {
         Some(p) => p.0,
         None => fxhash_bytes(bytes) | LONG,
@@ -81,7 +97,7 @@ fn id_key(bytes: &[u8]) -> u64 {
 /// check must send the run to the exact solver.
 #[inline(always)]
 fn event_key(bytes: &[u8]) -> u64 {
-    let k = id_key(bytes);
+    let k = id_key::<b'e'>(bytes);
     if k & LONG != 0 && COLLIDE.load(Ordering::Relaxed) { LONG | 1 } else { k }
 }
 
@@ -220,7 +236,7 @@ struct Users {
     mask: usize,
     /// Union-find parent of each index (only ever points to a smaller index).
     parent: Vec<AtomicU32>,
-    /// Each index's ID: its packed key, or `LONG` | arena reference.
+    /// Each index's ID: its inline key, or `LONG` | arena reference.
     ukey: Vec<AtomicU64>,
     next_block: AtomicU32,
     block: u32,
@@ -241,14 +257,13 @@ struct Ctx {
     inserted: usize,
 }
 
-/// A user ID whose table slot was prefetched, resolved `DEPTH` rows later.
+/// A user ID whose table slot was prefetched for the pending batch.
 #[derive(Clone, Copy)]
 struct Pend {
     ptr: *const u8,
     len: u32,
-    /// Where the index goes: a record position, or which side of a link.
-    dst: u32,
-    b: u32,
+    /// Event bucket or the side of a link.
+    dest: u32,
     key: u64,
     h: u64,
 }
@@ -262,51 +277,37 @@ impl Pend {
     }
 }
 
-const RING: usize = 64;
+const MAX_BATCH: usize = 64;
 
-/// Lookups in flight (`SHOPPING_OPQ_DEPTH`, default 16, at most 64).
+/// Lookups per batch (`SHOPPING_OPQ_DEPTH`, default 16, at most 64).
 fn depth() -> usize {
-    env::var("SHOPPING_OPQ_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(16).clamp(1, RING)
+    env::var("SHOPPING_OPQ_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(16).clamp(1, MAX_BATCH)
 }
 
-/// FIFO of pending lookups, each with the record it completes.
-struct Ring<T: Copy> {
-    buf: [(Pend, T); RING],
-    head: usize,
+/// Parse and prefetch a batch; resolve its lookups in input order.
+struct Batch<T: Copy> {
+    buf: [(Pend, T); MAX_BATCH],
     n: usize,
     depth: usize,
 }
 
-impl<T: Copy> Ring<T> {
+impl<T: Copy> Batch<T> {
     fn new(zero: T, depth: usize) -> Self {
-        let z = Pend { ptr: std::ptr::null(), len: 0, dst: 0, b: 0, key: 0, h: 0 };
-        Self { buf: [(z, zero); RING], head: 0, n: 0, depth }
-    }
-
-    /// Queue `p`; when full, return the oldest entry for resolution.
-    #[inline(always)]
-    fn push(&mut self, p: (Pend, T)) -> Option<(Pend, T)> {
-        if self.n == self.depth {
-            let old = self.buf[self.head];
-            self.head = (self.head + 1) % RING;
-            self.buf[(self.head + self.n - 1) % RING] = p;
-            Some(old)
-        } else {
-            self.buf[(self.head + self.n) % RING] = p;
-            self.n += 1;
-            None
-        }
+        let z = Pend { ptr: std::ptr::null(), len: 0, dest: 0, key: 0, h: 0 };
+        Self { buf: [(z, zero); MAX_BATCH], n: 0, depth }
     }
 
     #[inline(always)]
-    fn pop(&mut self) -> Option<(Pend, T)> {
-        if self.n == 0 {
-            return None;
-        }
-        let p = self.buf[self.head];
-        self.head = (self.head + 1) % RING;
-        self.n -= 1;
-        Some(p)
+    fn push(&mut self, p: (Pend, T)) -> bool {
+        self.buf[self.n] = p;
+        self.n += 1;
+        self.n == self.depth
+    }
+
+    #[inline(always)]
+    fn take(&mut self) -> &[(Pend, T)] {
+        let n = std::mem::take(&mut self.n);
+        &self.buf[..n]
     }
 }
 
@@ -357,24 +358,31 @@ impl Users {
             use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
             _mm_prefetch(self.slots.as_ptr().add(2 * ((h as usize) & self.mask)) as *const i8, _MM_HINT_T0);
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: the pointer is a slot in the table and `prfm` only hints.
+        unsafe {
+            let slot = self.slots.as_ptr().add(2 * ((h as usize) & self.mask));
+            core::arch::asm!("prfm pldl1keep, [{slot}]", slot = in(reg) slot,
+                options(readonly, nostack, preserves_flags));
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let _ = h;
     }
 
     /// A pending lookup for `bytes` (non-empty, inside a scan buffer), with its
     /// slot prefetched.
     #[inline(always)]
-    fn pend(&self, bytes: &[u8], dst: u32, b: u32) -> Pend {
-        let key = id_key(bytes);
+    fn pend(&self, bytes: &[u8], dest: u32) -> Pend {
+        let key = id_key::<b'u'>(bytes);
         let h = mix64(key);
         self.prefetch(h);
-        Pend { ptr: bytes.as_ptr(), len: bytes.len() as u32, dst, b, key, h }
+        Pend { ptr: bytes.as_ptr(), len: bytes.len() as u32, dest, key, h }
     }
 
     /// `intern_slow` with the key computed here (tests).
     #[cfg(test)]
     fn intern(&self, bytes: &[u8], ctx: &mut Ctx) -> u32 {
-        let key = id_key(bytes);
+        let key = id_key::<b'u'>(bytes);
         self.intern_slow(bytes, key, mix64(key), ctx)
     }
 
@@ -386,15 +394,20 @@ impl Users {
         let mut probes = 0u32;
         loop {
             let ks = &self.slots[2 * i];
-            let mut k = ks.load(Ordering::Acquire);
+            // The key reserves a slot. The separate value's Release/Acquire
+            // publishes the user record and any bytes in its arena.
+            let mut k = ks.load(Ordering::Relaxed);
             if k == 0 {
-                match ks.compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire) {
+                match ks.compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed) {
                     Ok(_) => return self.claim(i, key, bytes, ctx),
                     Err(actual) => k = actual,
                 }
             }
             if k == key {
                 let v = self.wait(i);
+                if v == FAILED_CLAIM {
+                    return INVALID;
+                }
                 if key & LONG == 0 || self.arenas.bytes((v >> 32) as u32) == bytes {
                     return (v as u32).wrapping_sub(1);
                 }
@@ -419,7 +432,7 @@ impl Users {
                 // Publish something so no reader waits forever; the run is void.
                 self.table_full.store(true, Ordering::Relaxed);
                 self.overflow.store(true, Ordering::Relaxed);
-                self.slots[2 * i + 1].store(1, Ordering::Release);
+                self.slots[2 * i + 1].store(FAILED_CLAIM, Ordering::Release);
                 return INVALID;
             }
             ctx.u_next = start as u32;
@@ -436,7 +449,7 @@ impl Users {
                 }
                 None => {
                     self.overflow.store(true, Ordering::Relaxed);
-                    self.slots[2 * i + 1].store(val, Ordering::Release);
+                    self.slots[2 * i + 1].store(FAILED_CLAIM, Ordering::Release);
                     return INVALID;
                 }
             }
@@ -492,10 +505,14 @@ impl Users {
     #[inline]
     fn id_bytes<'a>(&'a self, u: u32, buf: &'a mut [u8; 10]) -> &'a [u8] {
         let k = self.ukey[u as usize].load(Ordering::Relaxed);
-        if k & LONG == 0 {
-            id::unpack(PackedId(k), buf)
-        } else {
+        if k & LONG != 0 {
             self.arenas.bytes(k as u32)
+        } else if k >= RAW_SUFFIX {
+            buf[0] = b'u';
+            buf[1..9].copy_from_slice(&k.to_be_bytes());
+            &buf[..if k as u8 == 0 { 8 } else { 9 }]
+        } else {
+            id::unpack(PackedId(k), buf)
         }
     }
 
@@ -504,8 +521,8 @@ impl Users {
     fn id_less(&self, a: u32, b: u32) -> bool {
         let ka = self.ukey[a as usize].load(Ordering::Relaxed);
         let kb = self.ukey[b as usize].load(Ordering::Relaxed);
-        if ka & LONG == 0 && kb & LONG == 0 {
-            return ka < kb; // packed order is byte order
+        if (ka | kb) < LONG && (ka < RAW_SUFFIX) == (kb < RAW_SUFFIX) {
+            return ka < kb; // Within either inline encoding, key order is byte order.
         }
         let (mut x, mut y) = ([0u8; 10], [0u8; 10]);
         self.id_bytes(a, &mut x) < self.id_bytes(b, &mut y)
@@ -736,20 +753,15 @@ struct PRec {
     pc: u32,
 }
 
-/// A long event key and where its bytes are (`ev_arena` offset), filed in the
-/// event's bucket so that matching keys can be checked there (16 bytes).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct LRef {
-    key: u64,
-    r: u64,
-}
+/// Six high bits identify the scan worker that owns the long ID's bytes.
+const EVIDENCE_BITS: u32 = 58;
+const EVIDENCE_MASK: u64 = (1 << EVIDENCE_BITS) - 1;
 
 struct ScanOut {
     /// Filled from a `Stager` (64-byte aligned buffers): never dropped.
     ebuckets: Staged<ERec>,
-    /// Long event keys per event bucket (staged, never dropped).
-    lbuckets: Staged<LRef>,
+    /// Exact byte references, in long-event order within each bucket.
+    lbuckets: Staged<u64>,
     ev_arena: FallbackArena,
     clicks: Vec<CRec>,
     click_arena: FallbackArena,
@@ -834,7 +846,7 @@ pub fn run(
                 let zero_e = ERec { key: 0, ingest: 0, u: 0, ts: 0, pc: 0 };
                 let zero_c = CRec { ts: 0, cid: 0, u: 0, camp: 0 };
                 let mut stager: Stager<ERec, 8> = Stager::new(n_eb, reserve, zero_e);
-                let mut lstager: Stager<LRef, 12> = Stager::new(n_eb, reserve / 6 + 4, LRef { key: 0, r: 0 });
+                let mut lstager: Stager<u64, 8> = Stager::new(n_eb, reserve / 6 + 4, 0);
                 let mut out = ScanOut {
                     ebuckets: Staged::empty(),
                     lbuckets: Staged::empty(),
@@ -846,15 +858,15 @@ pub fn run(
                 let mut tmp_arena = FallbackArena::new();
                 let mut reader = scan::Reader::default();
                 let d = depth();
-                let mut ring_l: Ring<()> = Ring::new((), d);
-                let mut ring_e: Ring<ERec> = Ring::new(zero_e, d);
-                let mut ring_c: Ring<CRec> = Ring::new(zero_c, d);
+                let mut batch_l: Batch<()> = Batch::new((), d);
+                let mut batch_e: Batch<(ERec, u64)> = Batch::new((zero_e, 0), d);
+                let mut batch_c: Batch<CRec> = Batch::new(zero_c, d);
                 let mut link_a = INVALID;
                 macro_rules! resolve_link {
                     ($p:expr) => {{
                         let (p, ()) = $p;
                         let u = users.intern_slow(p.bytes(), p.key, p.h, &mut ctx);
-                        if p.dst == 0 {
+                        if p.dest == 0 {
                             link_a = u;
                         } else if link_a != INVALID && u != INVALID && link_a != u {
                             users.union(link_a, u);
@@ -863,9 +875,12 @@ pub fn run(
                 }
                 macro_rules! resolve_event {
                     ($p:expr) => {{
-                        let (p, mut r) = $p;
+                        let (p, (mut r, evidence)) = $p;
                         r.u = users.intern_slow(p.bytes(), p.key, p.h, &mut ctx);
-                        stager.push(p.b as usize, r);
+                        if r.key & LONG != 0 {
+                            lstager.push(p.dest as usize, evidence);
+                        }
+                        stager.push(p.dest as usize, r);
                     }};
                 }
                 macro_rules! resolve_click {
@@ -909,12 +924,14 @@ pub fn run(
                                     return;
                                 }
                                 for (x, side) in [(a, 0), (b, 1)] {
-                                    if let Some(p) = ring_l.push((users.pend(x, side, 0), ())) {
-                                        resolve_link!(p);
+                                    if batch_l.push((users.pend(x, side), ())) {
+                                        for &p in batch_l.take() {
+                                            resolve_link!(p);
+                                        }
                                     }
                                 }
                             });
-                            while let Some(p) = ring_l.pop() {
+                            for &p in batch_l.take() {
                                 resolve_link!(p);
                             }
                         }
@@ -924,7 +941,7 @@ pub fn run(
                             if event_id.is_empty() {
                                 return;
                             }
-                            let Some(ingest_ts) = parse_f1_cached(ingest_text, &mut dates) else {
+                            let Some(ingest_secs) = parse_f1_seconds_cached(ingest_text, &mut dates) else {
                                 return;
                             };
                             let mut valid = false;
@@ -958,7 +975,7 @@ pub fn run(
                                         if let Some(ts) = parse_ts_cached(ts_text, &mut dates) {
                                             if ts >= window_start
                                                 && ts < window_end
-                                                && ingest_ts.saturating_sub(ts) <= LATE_LIMIT_MS
+                                                && (ingest_secs * MS_PER_SECOND).saturating_sub(ts) <= LATE_LIMIT_MS
                                             {
                                                 valid = true;
                                                 ts_val = ts;
@@ -988,11 +1005,17 @@ pub fn run(
                             }
                             let key = event_key(event_id);
                             let b = ebucket(key);
-                            if key & LONG != 0 {
-                                let r = out.ev_arena.push_fallback(event_id);
-                                lstager.push(b, LRef { key, r: r.0 });
-                            }
-                            let ing = ingest_ts.div_euclid(1000) - ingest_base;
+                            let evidence = if key & LONG != 0 {
+                                let off = out.ev_arena.push_fallback(event_id).0 & !FALLBACK;
+                                if off > EVIDENCE_MASK {
+                                    out_of_range.store(true, Ordering::Relaxed);
+                                    return;
+                                }
+                                (wid as u64) << EVIDENCE_BITS | off
+                            } else {
+                                0
+                            };
+                            let ing = ingest_secs - ingest_base;
                             if !(0..=u32::MAX as i64).contains(&ing) {
                                 out_of_range.store(true, Ordering::Relaxed);
                                 return;
@@ -1000,10 +1023,15 @@ pub fn run(
                             let (u, ts_off) = if valid { (0, (ts_val - window_start) as u32) } else { (INVALID, 0) };
                             let r = ERec { key, ingest: ing as u32, u, ts: ts_off, pc: (price_val << 8) | cat_id };
                             if valid {
-                                if let Some(p) = ring_e.push((users.pend(user_id, 0, b as u32), r)) {
-                                    resolve_event!(p);
+                                if batch_e.push((users.pend(user_id, b as u32), (r, evidence))) {
+                                    for &p in batch_e.take() {
+                                        resolve_event!(p);
+                                    }
                                 }
                             } else {
+                                if key & LONG != 0 {
+                                    lstager.push(b, evidence);
+                                }
                                 stager.push(b, r);
                             }
                         }),
@@ -1040,15 +1068,17 @@ pub fn run(
                                 }
                             };
                             let c = CRec { ts, cid, u: 0, camp: camp_idx };
-                            if let Some(p) = ring_c.push((users.pend(user_id, 0, 0), c)) {
-                                resolve_click!(p);
+                            if batch_c.push((users.pend(user_id, 0), c)) {
+                                for &p in batch_c.take() {
+                                    resolve_click!(p);
+                                }
                             }
                         }),
                     }
-                    while let Some(p) = ring_e.pop() {
+                    for &p in batch_e.take() {
                         resolve_event!(p);
                     }
-                    while let Some(p) = ring_c.pop() {
+                    for &p in batch_c.take() {
                         resolve_click!(p);
                     }
                     if mapped {
@@ -1197,26 +1227,39 @@ pub fn run(
                 let mut table: Vec<ERec> = vec![ERec { key: 0, ingest: 0, u: 0, ts: 0, pc: 0 }; tsize];
                 let per_pb = n_records / n_pb.max(1) / workers.max(1) * 5 / 4 + 16;
                 let mut pstage: Stager<PRec, 16> = Stager::new(n_pb, per_pb, PRec { p: 0, ts: 0, pc: 0 });
-                // Long-key check: (key, worker, arena offset), cleared through `vused`.
-                let mut vtable: Vec<(u64, u32, u64)> = Vec::new();
-                let mut vused: Vec<u32> = Vec::new();
-                loop {
+                let mut first_long = vec![0u64; tsize];
+                let bytes = |evidence: u64| -> &[u8] {
+                    let a = &outs[(evidence >> EVIDENCE_BITS) as usize].ev_arena.bytes;
+                    let (off, len) = PackedId(FALLBACK | (evidence & EVIDENCE_MASK)).fallback_span(a);
+                    &a[off..off + len]
+                };
+                'buckets: loop {
                     let b = next_eb.fetch_add(1, Ordering::Relaxed);
-                    if b >= n_eb {
+                    if b >= n_eb || long_mismatch.load(Ordering::Relaxed) {
                         break;
                     }
-                    let mut long_hit = false;
                     for o in outs.iter() {
+                        // Each worker emits its long ID reference alongside the
+                        // event, so this side span follows the same bucket order.
+                        let mut ids = o.lbuckets[b].iter();
                         for r in o.ebuckets[b].iter() {
+                            let long = r.key & LONG != 0;
+                            let evidence = if long { *ids.next().expect("long ID reference") } else { 0 };
                             let mut s = (mix64(r.key) as usize) & tmask;
                             loop {
                                 let e = &mut table[s];
                                 if e.key == 0 {
                                     *e = *r;
+                                    if long {
+                                        first_long[s] = evidence;
+                                    }
                                     break;
                                 }
                                 if e.key == r.key {
-                                    long_hit |= r.key & LONG != 0;
+                                    if long && bytes(first_long[s]) != bytes(evidence) {
+                                        long_mismatch.store(true, Ordering::Relaxed);
+                                        break 'buckets;
+                                    }
                                     if r.ingest < e.ingest {
                                         *e = *r; // equal ingest: copies are identical, keep the first
                                     }
@@ -1224,45 +1267,6 @@ pub fn run(
                                 }
                                 s = (s + 1) & tmask;
                             }
-                        }
-                    }
-                    if long_hit {
-                        // Two long copies shared a key: every long key here must
-                        // have one byte string, or the run goes to the exact solver.
-                        let n_l: usize = outs.iter().map(|o| o.lbuckets[b].len()).sum();
-                        let vsize = (n_l * 2).next_power_of_two().max(16);
-                        if vtable.len() < vsize {
-                            vtable = vec![(0, 0, 0); vsize];
-                        }
-                        let vmask = vsize - 1;
-                        let bytes = |w: usize, r: u64| -> &[u8] {
-                            let a = &outs[w].ev_arena.bytes;
-                            let (off, len) = PackedId(r).fallback_span(a);
-                            &a[off..off + len]
-                        };
-                        vused.clear();
-                        for (w, o) in outs.iter().enumerate() {
-                            for lr in o.lbuckets[b].iter() {
-                                let mut s = (mix64(lr.key) as usize) & vmask;
-                                loop {
-                                    let e = &mut vtable[s];
-                                    if e.0 == 0 {
-                                        *e = (lr.key, w as u32, lr.r);
-                                        vused.push(s as u32);
-                                        break;
-                                    }
-                                    if e.0 == lr.key {
-                                        if bytes(e.1 as usize, e.2) != bytes(w, lr.r) {
-                                            long_mismatch.store(true, Ordering::Relaxed);
-                                        }
-                                        break;
-                                    }
-                                    s = (s + 1) & vmask;
-                                }
-                            }
-                        }
-                        for &s in &vused {
-                            vtable[s as usize].0 = 0;
                         }
                     }
                     const AHEAD: usize = 16;
@@ -1584,19 +1588,17 @@ mod tests {
     }
 
     #[test]
-    fn ring_resolves_in_push_order_at_every_depth() {
+    fn batch_resolves_in_push_order_at_every_depth() {
         for depth in [1, 2, 7, 16, 64] {
-            let mut r: Ring<u32> = Ring::new(0, depth);
-            let z = Pend { ptr: std::ptr::null(), len: 0, dst: 0, b: 0, key: 0, h: 0 };
+            let mut r: Batch<u32> = Batch::new(0, depth);
+            let z = Pend { ptr: std::ptr::null(), len: 0, dest: 0, key: 0, h: 0 };
             let mut out = Vec::new();
             for i in 0..500u32 {
-                if let Some((_, v)) = r.push((z, i)) {
-                    out.push(v);
+                if r.push((z, i)) {
+                    out.extend(r.take().iter().map(|&(_, v)| v));
                 }
             }
-            while let Some((_, v)) = r.pop() {
-                out.push(v);
-            }
+            out.extend(r.take().iter().map(|&(_, v)| v));
             assert_eq!(out, (0..500).collect::<Vec<_>>(), "depth {depth}");
         }
     }
@@ -1647,6 +1649,8 @@ mod tests {
         let ids: Vec<&[u8]> = vec![
             b"u1", b"U1", b"u1 ", b" u1", b"u02423c3d84ab053af78764ce49f23b5c", b"u02423c3d84ab053af78764ce49f23b5d",
             "é".as_bytes(), b"0123456789", b"01234567890", b"a_b", b"a-b",
+            b"u1234567", b"u12345678", b"u1234567\0", b"u12345\x807",
+            b"u\x0f2345678", b"u\x102345678", b"u\x7f2345678", b"u\x802345678",
         ];
         let (buf, spans) = padded(&ids);
         let at = |i: usize| &buf[spans[i].0..spans[i].0 + spans[i].1];
@@ -1674,6 +1678,17 @@ mod tests {
                 assert_eq!(users.id_less(first[i], first[j]), ids[i] < ids[j], "{:?} {:?}", ids[i], ids[j]);
             }
         }
+    }
+
+    #[test]
+    fn failed_intern_never_publishes_unwritten_bytes() {
+        let users = Users::new(1 << 16, 1, 0);
+        let mut ctx = users.ctx(0);
+        let (buf, spans) = padded(&[b"a user ID requiring an arena"]);
+        let bytes = &buf[..spans[0].1];
+        assert_eq!(users.intern(bytes, &mut ctx), INVALID);
+        assert_eq!(users.intern(bytes, &mut ctx), INVALID);
+        assert!(users.overflow.load(Ordering::Relaxed));
     }
 
     #[test]

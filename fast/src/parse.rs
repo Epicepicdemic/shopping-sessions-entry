@@ -1,5 +1,5 @@
 //! Exact CSV line scanning and timestamp/price parsers according to `rules.md`.
-//! Includes runtime CPU feature detection (`avx2` on x86_64, `neon` on aarch64) with a scalar fallback.
+//! SIMD is selected at build time; the x86 dispatcher checks the optimized builds.
 
 pub const MS_PER_SECOND: i64 = 1_000;
 pub const MS_PER_MINUTE: i64 = 60_000;
@@ -13,25 +13,18 @@ pub fn scanner_name() -> &'static str {
     return "scalar";
     #[cfg(all(target_arch = "aarch64", not(feature = "scalar")))]
     return "neon";
-    #[cfg(all(target_arch = "x86_64", not(feature = "scalar")))]
-    if is_x86_feature_detected!("avx2") {
-        return "avx2";
-    }
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(feature = "scalar")))]
+    return "avx2";
     #[allow(unreachable_code)]
     "scalar"
 }
 
-/// Find the next `\n` in `buf`, using runtime-dispatched SIMD (AVX2 on x86_64, NEON on aarch64)
-/// or a fast 64-bit word scan fallback.
+/// Find the next `\n` with the build's SIMD or a 64-bit word scan.
 #[inline(always)]
 pub fn find_newline(buf: &[u8]) -> Option<usize> {
-    #[cfg(all(target_arch = "x86_64", not(feature = "scalar")))]
-    {
-        if is_x86_feature_detected!("avx2") {
-            // SAFETY: avx2 is verified present at runtime.
-            return unsafe { find_newline_avx2(buf) };
-        }
-    }
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(feature = "scalar")))]
+    // SAFETY: AVX2 is a requirement of this build.
+    return unsafe { find_newline_avx2(buf) };
     #[cfg(all(target_arch = "aarch64", not(feature = "scalar")))]
     {
         // NEON is baseline on aarch64
@@ -63,7 +56,7 @@ pub fn find_newline_scalar(buf: &[u8]) -> Option<usize> {
     None
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "scalar")))]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(feature = "scalar")))]
 #[target_feature(enable = "avx2")]
 unsafe fn find_newline_avx2(buf: &[u8]) -> Option<usize> {
     use std::arch::x86_64::*;
@@ -107,7 +100,7 @@ unsafe fn find_newline_neon(buf: &[u8]) -> Option<usize> {
 }
 
 // Mask commas and quotes together, so ordinary field bytes need no second scan.
-#[cfg(all(target_arch = "x86_64", not(feature = "scalar")))]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(feature = "scalar")))]
 #[target_feature(enable = "avx2")]
 unsafe fn special_mask(bytes: &[u8]) -> u64 {
     use std::arch::x86_64::*;
@@ -134,13 +127,9 @@ unsafe fn special_mask(bytes: &[u8]) -> u64 {
 pub fn parse_csv_line<const N: usize>(line: &[u8]) -> Option<[&[u8]; N]> {
     #[cfg(feature = "scalar")]
     return parse_csv_line_scalar(line);
-    #[cfg(all(not(feature = "scalar"), target_arch = "x86_64"))]
-    if !is_x86_feature_detected!("avx2") {
-        return parse_csv_line_scalar(line);
-    }
     #[cfg(all(
         not(feature = "scalar"),
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(all(target_arch = "x86_64", target_feature = "avx2"), target_arch = "aarch64")
     ))]
     {
         if line.is_empty() {
@@ -210,7 +199,7 @@ pub fn parse_csv_line<const N: usize>(line: &[u8]) -> Option<[&[u8]; N]> {
     }
     #[cfg(all(
         not(feature = "scalar"),
-        not(any(target_arch = "x86_64", target_arch = "aarch64"))
+        not(any(all(target_arch = "x86_64", target_feature = "avx2"), target_arch = "aarch64"))
     ))]
     parse_csv_line_scalar(line)
 }
@@ -378,27 +367,27 @@ pub fn parse_calendar_part(text: &[u8]) -> Option<i64> {
 pub struct DateCache {
     key: [u64; 32],
     key2: [u16; 32],
-    days: [i64; 32],
+    midnight: [i64; 32],
 }
 
 impl Default for DateCache {
     fn default() -> Self {
         // Key 0 never matches: a real date's first 8 bytes are digits and dashes.
-        Self { key: [0; 32], key2: [0; 32], days: [0; 32] }
+        Self { key: [0; 32], key2: [0; 32], midnight: [0; 32] }
     }
 }
 
-/// `parse_calendar_part` with a cache of validated dates.
+/// Parse the calendar part in seconds, caching each validated date's midnight.
 #[inline(always)]
-pub fn parse_calendar_cached(text: &[u8], cache: &mut DateCache) -> Option<i64> {
+fn parse_calendar_seconds_cached(text: &[u8], cache: &mut DateCache) -> Option<i64> {
     if text.len() != 19 || text[10] != b'T' {
         return None;
     }
     let key = u64::from_le_bytes(text[0..8].try_into().unwrap());
     let key2 = u16::from_le_bytes([text[8], text[9]]);
     let slot = (text[8].wrapping_mul(10).wrapping_add(text[9]) & 31) as usize;
-    let days = if cache.key[slot] == key && cache.key2[slot] == key2 {
-        cache.days[slot]
+    let midnight = if cache.key[slot] == key && cache.key2[slot] == key2 {
+        cache.midnight[slot]
     } else {
         if text[4] != b'-' || text[7] != b'-' {
             return None;
@@ -409,17 +398,23 @@ pub fn parse_calendar_cached(text: &[u8], cache: &mut DateCache) -> Option<i64> 
         if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
             return None;
         }
-        let days = days_from_civil(year, month, day);
+        let midnight = days_from_civil(year, month, day) * 86_400;
         cache.key[slot] = key;
         cache.key2[slot] = key2;
-        cache.days[slot] = days;
-        days
+        cache.midnight[slot] = midnight;
+        midnight
     };
     let (hour, minute, second) = hh_mm_ss(text)?;
     if hour > 23 || minute > 59 || second > 59 {
         return None;
     }
-    Some(((days * 24 + hour) * 60 + minute) * MS_PER_MINUTE + second * MS_PER_SECOND)
+    Some(midnight + hour * 3600 + minute * 60 + second)
+}
+
+/// `parse_calendar_part` with a cache of validated dates.
+#[inline(always)]
+fn parse_calendar_cached(text: &[u8], cache: &mut DateCache) -> Option<i64> {
+    parse_calendar_seconds_cached(text, cache).map(|seconds| seconds * MS_PER_SECOND)
 }
 
 /// `HH:MM:SS` at bytes 11..19 by SWAR on one 8-byte word: the colons, then
@@ -442,14 +437,20 @@ fn hh_mm_ss(text: &[u8]) -> Option<(i64, i64, i64)> {
 /// `parse_f1` with a date cache.
 #[inline(always)]
 pub fn parse_f1_cached(text: &[u8], cache: &mut DateCache) -> Option<i64> {
+    parse_f1_seconds_cached(text, cache).map(|seconds| seconds * MS_PER_SECOND)
+}
+
+/// F1 has exact second resolution, including for dates before the epoch.
+#[inline(always)]
+pub fn parse_f1_seconds_cached(text: &[u8], cache: &mut DateCache) -> Option<i64> {
     if text.len() != 20 || text[19] != b'Z' {
         return None;
     }
-    parse_calendar_cached(&text[..19], cache)
+    parse_calendar_seconds_cached(&text[..19], cache)
 }
 
 /// F3 for a scan-buffer field (16 readable bytes from `text.as_ptr()`): up to
-/// 16 digits in SIMD, anything longer by `parse_f3`. Same result as `parse_f3`.
+/// 16 digits in SIMD or in machine words. Same result as `parse_f3`.
 #[inline(always)]
 pub fn parse_f3_padded(text: &[u8]) -> Option<i64> {
     #[cfg(all(target_arch = "x86_64", target_feature = "ssse3", target_feature = "sse4.1", not(feature = "scalar")))]
@@ -493,8 +494,35 @@ pub fn parse_f3_padded(text: &[u8]) -> Option<i64> {
             }
         }
     }
-    #[allow(unreachable_code)]
+    #[cfg(not(feature = "scalar"))]
+    {
+        const ZEROES: u64 = 0x3030_3030_3030_3030;
+        let n = text.len();
+        if (8..=16).contains(&n) {
+            let lo = eight_digits(u64::from_le_bytes(text[n - 8..].try_into().unwrap()))?;
+            if n == 8 {
+                return Some(lo);
+            }
+            let padding = (16 - n) * 8;
+            let head = u64::from_le_bytes(text[..8].try_into().unwrap());
+            let hi = eight_digits((head << padding) | (ZEROES & ((1u64 << padding) - 1)))?;
+            return Some(hi * 100_000_000 + lo);
+        }
+    }
     parse_f3(text)
+}
+
+/// Validate and reduce eight ASCII digits in little-endian byte order.
+#[cfg(not(feature = "scalar"))]
+#[inline(always)]
+fn eight_digits(word: u64) -> Option<i64> {
+    let d = word ^ 0x3030_3030_3030_3030;
+    if (d | d.wrapping_add(0x0606_0606_0606_0606)) & 0xF0F0_F0F0_F0F0_F0F0 != 0 {
+        return None;
+    }
+    let pairs = d.wrapping_mul(10).wrapping_add(d >> 8) & 0x00FF_00FF_00FF_00FF;
+    let quads = (pairs * 100 + (pairs >> 16)) & 0x0000_FFFF_0000_FFFF;
+    Some((quads as u32 as i64) * 10_000 + (quads >> 32) as i64)
 }
 
 /// `parse_ts` with a date cache, for a scan-buffer field (16 readable bytes

@@ -17,7 +17,7 @@ The default run is `fast/src/opaque.rs`. It treats every ID as an opaque string 
 - **IDs.** An ID of at most ten characters from `[0-9A-Z_a-z]` is keyed by its exact 60-bit packed form. Any other ID is keyed by a 64-bit hash, and its bytes are compared whenever two keys match, so two different IDs never merge.
 - **One pass over all input.** Links, events and clicks are read in parallel. Each user ID is interned into a dense index in a lock-free table; each link line joins its two indices in a concurrent union-find. Each event copy is filed under a bucket of its event key with its ingest time, user index and validated fields; each valid click is kept with its user index.
 - **Persons.** Each link component is a person named by its byte-wise smallest ID; every other ID is a person of its own.
-- **Dedup, then sessions.** Each event bucket keeps, per event ID, the copy with the smallest ingest time (dedup before validation), and files the surviving valid events by person. A bucket where two long event keys match compares the bytes of its long IDs. Each person bucket is then sessionized by the same code the exact solver uses (`fast/src/sink.rs`).
+- **Dedup, then sessions.** Each event bucket keeps, per event ID, the copy with the smallest ingest time (dedup before validation), and files the surviving valid events by person. When two long event keys match, the engine compares their exact ID bytes in the dedup pass. Each person bucket is then sessionized by the same code the exact solver uses (`fast/src/sink.rs`).
 - **Memory.** Records go to their buckets through cache-line staging with non-temporal stores, into spans carved from one region per worker. Each event bucket's dedup table holds the winning copy itself and is read back in order.
 - **Limits.** A user table that fills up is discarded and the scan repeats with one four times larger. Other input outside the engine's limits (a window longer than 49 days, more than 256 categories, an ingest time more than 68 years from the window, colliding hashes, or two different long event IDs with the same key) makes it stop before writing anything, and the exact solver runs instead. `SHOPPING_OPAQUE=0` runs the exact solver alone.
 
@@ -68,7 +68,7 @@ Switches, for measurement:
 | `SHOPPING_OPAQUE=0` | Runs the exact solver alone instead of the opaque-ID engine. |
 | `SHOPPING_FAST=1` | With `SHOPPING_OPAQUE=0`, turns on the older fast path (data from the earlier generator only). |
 | `SHOPPING_HUGE=0` | No transparent huge pages for the opaque engine's tables. |
-| `SHOPPING_OPQ_DEPTH=1`..`64` | User-table lookups in flight per scan thread (default 16). |
+| `SHOPPING_OPQ_DEPTH=1`..`64` | User-table lookups per scan-worker batch (default 16). |
 | `SHOPPING_POPULATE=1` | Maps each input range in one call before scanning it (opaque engine). |
 | `SHOPPING_BLOCKSCAN=1` | Uses the block scanner (per-64-byte masks and one quote-parity pass) instead of the line splitter. |
 | `SHOPPING_DISCARD=1` | Returns each consumed bucket to the kernel during the run instead of at exit. |
@@ -83,7 +83,7 @@ Switches, for measurement:
 
 ## How it works
 
-- **Scan.** Each input file is split into newline-aligned ranges. A single-pass splitter validates the CSV structure: SIMD in the v3 and v4 builds, scalar in the portable build and with `--features scalar`. IDs of up to ten supported characters pack into 60 bits; longer IDs go to byte arenas.
+- **Scan.** Each input file is split into newline-aligned ranges. A single-pass splitter validates the CSV structure: AVX2 in v3, AVX-512BW in v4, SSE2 in portable x86-64, NEON on AArch64, and scalar with `--features scalar`. IDs of up to ten supported characters pack into 60 bits; longer IDs go to byte arenas.
 - **Exact solver.**
   - Events are deduplicated in 2,048 hash shards, keeping the earliest ingest; an invalid earliest copy is kept as a marker.
   - Links are resolved with union-find, naming each person by the bytewise-smallest ID.
