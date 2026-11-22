@@ -42,10 +42,15 @@ const FALLBACK: u64 = 1 << 63;
 const INVALID: u32 = u32::MAX;
 /// Offsets in one long-ID arena (64 MiB each).
 const ARENA_BITS: u32 = 26;
-/// Records per event bucket the dedup table is sized for.
+/// Records per event bucket the dedup table is sized for
+/// (`SHOPPING_OPQ_EB` overrides, for measurement).
 const BUCKET_TARGET: usize = 32 * 1024;
-/// Events per person bucket.
+/// Events per person bucket (`SHOPPING_OPQ_PB` overrides, for measurement).
 const PERSON_TARGET: usize = 32 * 1024;
+
+fn env_usize(name: &str, default: usize) -> usize {
+    env::var(name).ok().and_then(|v| v.parse().ok()).filter(|&v| v > 0).unwrap_or(default)
+}
 
 pub fn enabled() -> bool {
     env::var("SHOPPING_OPAQUE").ok().as_deref() != Some("0")
@@ -192,6 +197,8 @@ struct Users {
     max_used: usize,
     arenas: Arenas,
     overflow: AtomicBool,
+    /// The table itself ran out of room (a larger table may succeed).
+    table_full: AtomicBool,
 }
 
 struct Ctx {
@@ -288,6 +295,7 @@ impl Users {
             max_used,
             arenas: Arenas::new(workers, arena_cap),
             overflow: AtomicBool::new(false),
+            table_full: AtomicBool::new(false),
         }
     }
 
@@ -361,7 +369,8 @@ impl Users {
             }
             i = (i + 1) & self.mask;
             probes += 1;
-            if probes > 1 << 16 {
+            if probes > 1024 || (probes & 15 == 0 && self.overflow.load(Ordering::Relaxed)) {
+                self.table_full.store(true, Ordering::Relaxed);
                 self.overflow.store(true, Ordering::Relaxed);
                 return INVALID;
             }
@@ -375,6 +384,7 @@ impl Users {
             let start = b * self.block as u64;
             if start + self.block as u64 > self.limit_u as u64 {
                 // Publish something so no reader waits forever; the run is void.
+                self.table_full.store(true, Ordering::Relaxed);
                 self.overflow.store(true, Ordering::Relaxed);
                 self.slots[2 * i + 1].store(1, Ordering::Release);
                 return INVALID;
@@ -405,6 +415,7 @@ impl Users {
         self.slots[2 * i + 1].store(val, Ordering::Release);
         ctx.inserted += 1;
         if ctx.inserted & 1023 == 0 && self.used.fetch_add(1024, Ordering::Relaxed) + 1024 > self.max_used {
+            self.table_full.store(true, Ordering::Relaxed);
             self.overflow.store(true, Ordering::Relaxed);
         }
         u
@@ -544,6 +555,16 @@ impl<T: Copy, const N: usize> Stager<T, N> {
                 }
             })
             .collect()
+    }
+}
+
+/// Free buffers made by `Stager::finish` with the layout they were allocated with.
+fn free_staged<T: Copy, const N: usize>(v: Vec<Vec<T>>) {
+    for mut b in v {
+        let (p, cap) = (b.as_mut_ptr(), b.capacity());
+        std::mem::forget(b);
+        // SAFETY: `finish` built this from a `Vec<Group<T, N>>` of `cap / N` groups.
+        unsafe { drop(Vec::from_raw_parts(p as *mut Group<T, N>, 0, cap / N)) }
     }
 }
 
@@ -693,13 +714,17 @@ pub fn run(
     let (lb, eb, cb) = (bytes_of(&link_inputs), bytes_of(&event_inputs), bytes_of(&click_inputs));
     let workers = ncpu.max(1).min(64);
 
-    // Table size from the input: link lines bring up to two IDs each; events
-    // and clicks repeat their users. Past 3/4 full the run falls back.
+    // Table size from the input: about 1.4 IDs per link line, and some
+    // users that appear in no link. A table that fills up is thrown away and
+    // the scan repeats with one 4x larger (up to 2^30 slots).
     let est_events = eb / 72 + 1;
-    let est_users = lb / 20 * 3 / 2 + (eb / 64 + cb / 48) / 16 + 1024;
-    let slots = (est_users * 7 / 5).next_power_of_two().max(1 << 16);
-    let users = Users::new(slots, workers, (lb + eb + cb) / workers.max(1) / 4 + (1 << 20));
-    let ebits = (est_events / BUCKET_TARGET).next_power_of_two().trailing_zeros().clamp(0, 14);
+    let est_users = lb / 26 * 7 / 5 + eb / (64 * 48) + cb / (48 * 64) + 4096;
+    let mut slots = (est_users * 7 / 5).next_power_of_two().max(1 << 16);
+    // Measurement: SHOPPING_OPQ_SLOTS=k forces 2^k slots.
+    if let Some(k) = env::var("SHOPPING_OPQ_SLOTS").ok().and_then(|v| v.parse::<u32>().ok()) {
+        slots = 1usize << k.clamp(16, 30);
+    }
+    let ebits = (est_events / env_usize("SHOPPING_OPQ_EB", BUCKET_TARGET)).next_power_of_two().trailing_zeros().clamp(0, 14);
     let n_eb = 1usize << ebits;
     let eshift = 64 - ebits;
     let ebucket = |key: u64| -> usize { if ebits == 0 { 0 } else { (mix64(key) >> eshift) as usize } };
@@ -719,7 +744,12 @@ pub fn run(
             jobs.push((kind, f, s, e));
         }
     }
+    let mut retries = 0u32;
+    let (users, outs) = loop {
+    let users = Users::new(slots, workers, (lb + eb + cb) / workers.max(1) / 4 + (1 << 20));
     let next_job = AtomicUsize::new(0);
+    // Thread-summed scan time per input kind (links, events, clicks), in ns.
+    let kind_ns: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
     let outs: Mutex<Vec<(usize, ScanOut)>> = Mutex::new(Vec::with_capacity(workers));
     let next_wid = AtomicUsize::new(0);
     thread::scope(|scope| {
@@ -771,6 +801,9 @@ pub fn run(
                     }};
                 }
                 loop {
+                    if users.overflow.load(Ordering::Relaxed) {
+                        break; // this scan is void; stop early
+                    }
                     let j = next_job.fetch_add(1, Ordering::Relaxed);
                     let Some(&(kind, f, start, end)) = jobs.get(j) else {
                         break;
@@ -781,6 +814,7 @@ pub fn run(
                         _ => &click_inputs,
                     };
                     let f = f as usize;
+                    let tj = Instant::now();
                     let (bytes, first, stop, mapped) = if use_pread {
                         let (b, x, y) = reader.load(&inputs.files[f], inputs.sizes[f], start, end).expect("read input");
                         (b, x, y, false)
@@ -945,22 +979,46 @@ pub fn run(
                     if mapped {
                         scan::unmap_pages(bytes, first, stop);
                     }
+                    kind_ns[kind as usize].fetch_add(tj.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
+                let tf = Instant::now();
                 out.ebuckets = std::mem::ManuallyDrop::new(stager.finish());
+                kind_ns[1].fetch_add(tf.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 outs.lock().unwrap().push((wid, out));
             });
         }
     });
-    let t_scan = t0.elapsed();
-    if users.overflow.load(Ordering::Relaxed) || out_of_range.load(Ordering::Relaxed) {
-        if timing() {
-            eprintln!("opaque: limits exceeded, exact solver");
-        }
-        return None;
+    if timing() {
+        let k = |i: usize| kind_ns[i].load(Ordering::Relaxed) as f64 / 1e6;
+        eprintln!("opaque_scan_thread_ms links={:.0} events={:.0} clicks={:.0} slots={} retries={}", k(0), k(1), k(2), slots, retries);
     }
     let mut outs = outs.into_inner().unwrap();
     outs.sort_by_key(|(w, _)| *w);
     let outs: Vec<ScanOut> = outs.into_iter().map(|(_, o)| o).collect();
+    if users.table_full.load(Ordering::Relaxed) && !out_of_range.load(Ordering::Relaxed) && slots < 1 << 30 {
+        for o in outs {
+            free_staged::<ERec, 8>(std::mem::ManuallyDrop::into_inner(o.ebuckets));
+        }
+        drop(users);
+        slots <<= 2;
+        retries += 1;
+        if timing() {
+            eprintln!("opaque: user table full, scanning again with {slots} slots");
+        }
+        continue;
+    }
+    if users.overflow.load(Ordering::Relaxed) || out_of_range.load(Ordering::Relaxed) {
+        if timing() {
+            eprintln!("opaque: limits exceeded, exact solver");
+        }
+        for o in outs {
+            free_staged::<ERec, 8>(std::mem::ManuallyDrop::into_inner(o.ebuckets));
+        }
+        return None;
+    }
+    break (users, outs);
+    };
+    let t_scan = t0.elapsed();
 
     // 2. Persons: the smallest ID of each component, then dense numbers.
     let u_max = (users.next_block.load(Ordering::Relaxed) as usize * users.block as usize).min(users.limit_u as usize);
@@ -1049,7 +1107,7 @@ pub fn run(
     }
     let n_records: usize = outs.iter().map(|o| o.ebuckets.iter().map(Vec::len).sum::<usize>()).sum();
     let per_person = (n_records / n_persons.max(1)).max(1);
-    let pbits = ((PERSON_TARGET / per_person).max(1).next_power_of_two().trailing_zeros()).min(20);
+    let pbits = ((env_usize("SHOPPING_OPQ_PB", PERSON_TARGET) / per_person).max(1).next_power_of_two().trailing_zeros()).min(20);
     let n_pb = (n_persons >> pbits) + 1;
     let next_eb = AtomicUsize::new(0);
     let dedup_out: Mutex<Vec<(std::mem::ManuallyDrop<Vec<Vec<PRec>>>, Vec<u64>)>> =
@@ -1059,7 +1117,8 @@ pub fn run(
         for _ in 0..workers {
             let (outs, p_of, next_eb, dedup_out) = (&outs, &p_of, &next_eb, &dedup_out);
             scope.spawn(move || {
-                let tsize = (max_bucket * 2).next_power_of_two().max(16);
+                // At most 2/3 full: the bucket's records over a power of two >= 1.5x.
+                let tsize = (max_bucket * 3 / 2 + 1).next_power_of_two().max(16);
                 let tmask = tsize - 1;
                 // (key, record index, ingest); key 0 = empty (keys are never 0)
                 let mut table: Vec<(u64, u32, u32)> = vec![(0, 0, 0); tsize];
