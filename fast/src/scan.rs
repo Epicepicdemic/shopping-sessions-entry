@@ -269,6 +269,9 @@ pub fn for_each_record<'a, const N: usize>(
     mut f: impl FnMut(&Rec<'a, N>),
 ) {
     debug_assert!(bytes.len() >= stop + SLACK);
+    if block_scan() {
+        return for_each_record_blocks::<N>(bytes, first, stop, f);
+    }
     let mut pos = first;
     while pos < stop {
         // The hardware streamer stops at 4 KiB page boundaries; fetch ahead so
@@ -296,6 +299,219 @@ pub fn for_each_record<'a, const N: usize>(
         }
         pos = next;
     }
+}
+
+// ------------------------------------------------------------------ block scanner
+static BLOCKS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// `SHOPPING_BLOCKSCAN=1`: scan each chunk once in 64-byte blocks (masks are
+/// computed once per block and carried across rows) instead of a 128-byte
+/// window per line. Read once per process.
+pub fn block_scan() -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    match BLOCKS.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = std::env::var("SHOPPING_BLOCKSCAN").is_ok_and(|v| v == "1");
+            BLOCKS.store(if on { 2 } else { 1 }, Relaxed);
+            on
+        }
+    }
+}
+
+thread_local! {
+    /// Per block k (slot k + 1; slots 0 and nb + 1 stay zero): newline,
+    /// comma and quote masks and the running quote parity, reused across chunks.
+    static BLOCK_MASKS: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Newline, comma and quote masks of the 64 bytes at `p` (bit i = byte i).
+/// SAFETY: 64 bytes at `p` must be readable.
+#[inline(always)]
+unsafe fn block_masks(p: *const u8) -> (u64, u64, u64) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(feature = "scalar")))]
+    unsafe {
+        use std::arch::x86_64::*;
+        #[inline(always)]
+        unsafe fn mm(x: __m256i, c: __m256i) -> u64 {
+            unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, c)) as u32 as u64 }
+        }
+        let a = _mm256_loadu_si256(p as *const __m256i);
+        let b = _mm256_loadu_si256(p.add(32) as *const __m256i);
+        let nl = _mm256_set1_epi8(b'\n' as i8);
+        let cm = _mm256_set1_epi8(b',' as i8);
+        let qt = _mm256_set1_epi8(b'"' as i8);
+        return (mm(a, nl) | (mm(b, nl) << 32), mm(a, cm) | (mm(b, cm) << 32), mm(a, qt) | (mm(b, qt) << 32));
+    }
+    #[allow(unreachable_code)]
+    {
+        let (mut nl, mut c, mut q) = (0u64, 0u64, 0u64);
+        for i in 0..64 {
+            // SAFETY: the caller guarantees 64 readable bytes.
+            let x = unsafe { *p.add(i) };
+            nl |= ((x == b'\n') as u64) << i;
+            c |= ((x == b',') as u64) << i;
+            q |= ((x == b'"') as u64) << i;
+        }
+        (nl, c, q)
+    }
+}
+
+/// Inclusive prefix XOR of a 64-bit mask (bit i = XOR of bits 0..=i).
+#[inline(always)]
+fn prefix_xor64(q: u64) -> u64 {
+    #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq", not(feature = "scalar")))]
+    unsafe {
+        use std::arch::x86_64::*;
+        return _mm_cvtsi128_si64(_mm_clmulepi64_si128::<0x00>(_mm_set_epi64x(0, q as i64), _mm_set1_epi64x(-1)))
+            as u64;
+    }
+    #[allow(unreachable_code)]
+    {
+        let mut x = q;
+        x ^= x << 1;
+        x ^= x << 2;
+        x ^= x << 4;
+        x ^= x << 8;
+        x ^= x << 16;
+        x ^= x << 32;
+        x
+    }
+}
+
+/// Bits lo..=hi (lo <= hi < 64).
+#[inline(always)]
+fn bit_range(lo: usize, hi: usize) -> u64 {
+    (u64::MAX >> (63 - hi)) & (u64::MAX << lo)
+}
+
+/// `for_each_record`, scanning `bytes[first..stop]` once in 64-byte blocks.
+/// Pass 1 computes each block's newline, comma and quote masks and the
+/// running quote parity (one carry-less multiply per block). Pass 2 walks the
+/// newlines; a row's quote state is the running parity XOR the parity just
+/// before the row, and the row is accepted by exactly the rules of
+/// `split_call` / `parse_csv_line`: N - 1 commas, no comma inside a quoted
+/// pair, an opening quote only at a field start, a closing quote only at a
+/// field end, an even number of quotes. Rows of any length are handled; the
+/// last line without a newline goes to `parse_csv_line`.
+pub fn for_each_record_blocks<'a, const N: usize>(
+    bytes: &'a [u8],
+    first: usize,
+    stop: usize,
+    mut f: impl FnMut(&Rec<'a, N>),
+) {
+    if stop <= first {
+        return;
+    }
+    let n = stop - first;
+    let nb = n.div_ceil(64);
+    assert!(bytes.len() >= first + 64 * nb, "the scan buffer must extend 64 bytes past stop");
+    BLOCK_MASKS.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+        buf.resize(4 * (nb + 2), 0);
+        let base = bytes.as_ptr().wrapping_add(first);
+        let mut carry = 0u64;
+        for k in 0..nb {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                use std::arch::x86_64::*;
+                _mm_prefetch::<_MM_HINT_T0>(base.wrapping_add(64 * k + PREFETCH) as *const i8);
+            }
+            // SAFETY: first + 64 * nb <= bytes.len() (asserted above).
+            let (mut nl, mut c, mut q) = unsafe { block_masks(base.add(64 * k)) };
+            if 64 * (k + 1) > n {
+                let keep = bit_range(0, n - 64 * k - 1);
+                nl &= keep;
+                c &= keep;
+                q &= keep;
+            }
+            let p = prefix_xor64(q) ^ carry;
+            carry = 0u64.wrapping_sub(p >> 63);
+            let i = 4 * (k + 1);
+            buf[i] = nl;
+            buf[i + 1] = c;
+            buf[i + 2] = q;
+            buf[i + 3] = p;
+        }
+        let mut rs = 0usize;
+        for kb in 0..nb {
+            let mut m = buf[4 * (kb + 1)];
+            while m != 0 {
+                let nlpos = 64 * kb + m.trailing_zeros() as usize;
+                m &= m - 1;
+                block_row::<N>(&buf, bytes, first, rs, nlpos, &mut f);
+                rs = nlpos + 1;
+            }
+        }
+        if rs < n {
+            let line = &bytes[first + rs..stop];
+            if let Some(fields) = parse_csv_line::<N>(line) {
+                f(&Rec::from_fields(line, fields));
+            }
+        }
+    });
+}
+
+/// Check and emit the row bytes[first + rs .. first + nlpos] (nlpos: its newline).
+#[inline(always)]
+fn block_row<'a, const N: usize>(
+    buf: &[u64],
+    bytes: &'a [u8],
+    first: usize,
+    rs: usize,
+    nlpos: usize,
+    f: &mut impl FnMut(&Rec<'a, N>),
+) {
+    let (k0, k1) = (rs / 64, nlpos / 64);
+    let before = if rs == 0 {
+        0
+    } else {
+        (buf[4 * ((rs - 1) / 64 + 1) + 3] >> ((rs - 1) % 64)) & 1
+    };
+    let fill = 0u64.wrapping_sub(before);
+    let mut bad = 0u64;
+    let mut commas = 0u32;
+    for k in k0..=k1 {
+        let i = 4 * (k + 1);
+        let (nl, c, q, p) = (buf[i], buf[i + 1], buf[i + 2], buf[i + 3]);
+        let lo = if k == k0 { rs % 64 } else { 0 };
+        let hi = if k == k1 { nlpos % 64 } else { 63 };
+        let mut rm = bit_range(lo, hi);
+        if k == k1 {
+            rm &= !(1u64 << hi);                  // the newline itself
+        }
+        let inside = p ^ fill;
+        let cm = c & rm;
+        let qm = q & rm;
+        let starts = (c << 1) | (buf[i - 3] >> 63) | (nl << 1) | (buf[i - 4] >> 63) | (k == 0) as u64;
+        let ends = (c >> 1) | (buf[i + 5] << 63) | (nl >> 1) | (buf[i + 4] << 63);
+        bad |= (inside & cm) | (qm & inside & !starts) | (qm & !inside & !ends);
+        if k == k1 {
+            bad |= inside & (1u64 << hi);         // an odd number of quotes
+        }
+        commas += cm.count_ones();
+    }
+    if bad != 0 || commas as usize != N - 1 {
+        return;
+    }
+    let len = nlpos - rs;
+    let mut ends = [len; N];
+    let mut j = 0usize;
+    for k in k0..=k1 {
+        let lo = if k == k0 { rs % 64 } else { 0 };
+        let hi = if k == k1 { nlpos % 64 } else { 63 };
+        let mut m = buf[4 * (k + 1) + 1] & bit_range(lo, hi);
+        while m != 0 {
+            ends[j] = 64 * k + m.trailing_zeros() as usize - rs;
+            m &= m - 1;
+            j += 1;
+        }
+    }
+    // SAFETY: rs <= nlpos < n and first + n <= bytes.len().
+    let line = unsafe { bytes.get_unchecked(first + rs..first + nlpos) };
+    f(&Rec { line, ends });
 }
 
 /// Prefix XOR of a 128-bit mask given as halves: bit i is the XOR of bits
@@ -504,6 +720,83 @@ mod tests {
         assert_eq!(records::<2>(&long), oracle::<2>(&long));
     }
 
+    fn block_records<const N: usize>(text: &[u8], tail: u8) -> Vec<Vec<Vec<u8>>> {
+        let mut bytes = text.to_vec();
+        bytes.resize(text.len() + SLACK, tail);       // bytes after stop need not be zero (mapped input)
+        let mut out = Vec::new();
+        for_each_record_blocks::<N>(&bytes, 0, text.len(), |r| {
+            out.push(r.fields().iter().map(|x| x.to_vec()).collect())
+        });
+        out
+    }
+
+    #[test]
+    fn block_scanner_matches_scalar_oracle() {
+        let mut rng = 0x2545F4914F6CDD1Du64;
+        let alphabets: [&[u8]; 3] = [b"ab,\"\n\r 1", b"aaaaaaaaaaaaaaaa,\"\n", b"x,\"\"\n\nabc,,"];
+        for case in 0..150000 {
+            let alphabet = alphabets[case % 3];
+            let len = case % 400;
+            let mut text = Vec::with_capacity(len);
+            for _ in 0..len {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                text.push(alphabet[(rng % alphabet.len() as u64) as usize]);
+            }
+            // Bytes after stop: zero slack, or (mapped input) the next chunk's data. A line
+            // without its newline is only ever a file's last line, followed by zero
+            // slack; every other line is followed by its newline (Rec::get relies on it).
+            let ends_nl = text.last() == Some(&b'\n');
+            let tail = if case % 2 == 0 || !ends_nl { 0 } else { [b',', b'"', b'\n'][case % 3] };
+            assert_eq!(block_records::<2>(&text, tail), oracle::<2>(&text), "{:?}", text);
+            assert_eq!(block_records::<4>(&text, tail), oracle::<4>(&text), "{:?}", text);
+            assert_eq!(block_records::<7>(&text, tail), oracle::<7>(&text), "{:?}", text);
+        }
+        // realistic rows: quoted fields, rows across block edges, long rows
+        let mut text = Vec::new();
+        for i in 0..3000 {
+            let q = |s: &str, on: bool| if on { format!("\"{s}\"") } else { s.to_string() };
+            let pad = "y".repeat(i % 150);
+            let row = format!("{},{},2026-10-0{}T12:00:00Z,{},{},p{},{}\n", q(&format!("e{i}"), i % 3 == 0),
+                              q(&format!("u{i}{pad}"), i % 5 == 0), i % 9 + 1, q("1790812800000", i % 7 == 0),
+                              q("view", i % 2 == 0), i % 50, if i % 11 == 0 { "\"bad" } else { "" });
+            text.extend_from_slice(row.as_bytes());
+        }
+        assert_eq!(block_records::<7>(&text, 0), oracle::<7>(&text));
+        assert_eq!(block_records::<7>(&text, b'"'), oracle::<7>(&text));
+    }
+
+    #[test]
+    fn block_scanner_survives_mutations_at_block_edges() {
+        // Realistic rows, then one byte changed, inserted or deleted at every
+        // offset within 3 bytes of each 64-byte block edge, for start offsets 0..64.
+        let mut base = Vec::new();
+        for i in 0..12 {
+            let row = format!("\"e{i}9zz\",u{i}qq{},\"2026-10-0{}T08:15:00Z\",1790812800{:03},\"purchase\",p{},\"12{}.50\"\n",
+                              "x".repeat(i * 7 % 40), i % 9 + 1, i, i % 30, i);
+            base.extend_from_slice(row.as_bytes());
+        }
+        let muts: [&[u8]; 9] = [b"\"", b",", b"\n", b"\r", b"\t", b" ", "\u{e9}".as_bytes(), b"", b"\"\""];
+        for start in [0usize, 1, 17, 31, 63] {
+            let text = &base[start..];
+            let edges: Vec<usize> = (64..text.len()).step_by(64).collect();
+            for &e in &edges {
+                for off in e.saturating_sub(3)..(e + 3).min(text.len()) {
+                    for m in &muts {
+                        for insert in [false, true] {
+                            let mut t = text[..off].to_vec();
+                            t.extend_from_slice(m);
+                            t.extend_from_slice(&text[off + (!insert) as usize..]);
+                            assert_eq!(block_records::<7>(&t, 0), oracle::<7>(&t), "start {start} off {off} mut {m:?}");
+                            assert_eq!(block_records::<4>(&t, 0), oracle::<4>(&t));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn chunks_own_each_line_once() {
         let dir = std::env::temp_dir().join(format!("scan-test-{}", std::process::id()));
@@ -549,6 +842,24 @@ mod tests {
                 });
             }
             assert_eq!(got, expected, "mapped chunk {chunk}");
+            for mapped in [false, true] {
+                let mut got = Vec::new();
+                for &(f, s, e) in &inputs.chunks {
+                    let (bytes, first, stop) = if mapped {
+                        let (b, x, y, _) = reader
+                            .load_mapped(&inputs.files[f as usize], inputs.sizes[f as usize],
+                                         inputs.maps[f as usize].as_slice(), s, e)
+                            .unwrap();
+                        (b, x, y)
+                    } else {
+                        reader.load(&inputs.files[f as usize], inputs.sizes[f as usize], s, e).unwrap()
+                    };
+                    for_each_record_blocks::<2>(bytes, first, stop, |r| {
+                        got.push(r.fields().iter().map(|y| y.to_vec()).collect::<Vec<_>>())
+                    });
+                }
+                assert_eq!(got, expected, "block scanner, chunk {chunk}, mapped {mapped}");
+            }
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }

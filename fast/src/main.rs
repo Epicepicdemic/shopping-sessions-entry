@@ -10,6 +10,7 @@ mod parse;
 mod scan;
 mod session;
 mod sink;
+mod stage;
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -878,8 +879,11 @@ fn run_pipeline(
             scope.spawn(|| {
                 let mut shards: Vec<EventBatch> =
                     (0..NUM_SHARDS).map(|_| EventBatch::default()).collect();
-                let mut fast_buckets: Vec<Vec<Rec16>> =
-                    (0..n_buckets).map(|_| Vec::with_capacity(bucket_reserve)).collect();
+                let staging = stage::enabled() && n_buckets > 0;
+                let mut fast_buckets: Vec<Vec<Rec16>> = (0..if staging { 0 } else { n_buckets })
+                    .map(|_| Vec::with_capacity(bucket_reserve))
+                    .collect();
+                let mut stager = staging.then(|| stage::Stager::new(n_buckets, bucket_reserve));
                 let mut fast_arena = FallbackArena::new();
                 // Full records of rows that do not fit 16 bytes (purchases are 3%),
                 // one list per thread: filing them by bucket too cost the scan a
@@ -1007,7 +1011,7 @@ fn run_pipeline(
                                     fastpath::OPAQUE | (wid << 40) | off
                                 };
                                 let b = (counter >> qb) as usize;
-                                fast_buckets[b].push(Rec16::encode(
+                                let rec = Rec16::encode(
                                     ingest_ts,
                                     ingest_base,
                                     counter,
@@ -1018,7 +1022,11 @@ fn run_pipeline(
                                     catalog.unknown_cat_id,
                                     wid,
                                     &mut fast_side,
-                                ));
+                                );
+                                match stager.as_mut() {
+                                    Some(st) => st.push(b, rec),
+                                    None => fast_buckets[b].push(rec),
+                                }
                                 return;
                             }
                             // An exact-path row naming a fast-shaped user makes that person exact.
@@ -1060,6 +1068,9 @@ fn run_pipeline(
                     }
                 }
                 worker_ev_shards.lock().unwrap().push(shards);
+                if let Some(st) = stager.take() {
+                    fast_buckets = st.finish();
+                }
                 if fast_ref.is_some() {
                     worker_fast.lock().unwrap().push((wid as usize, fast_buckets, fast_arena, fast_side));
                 }
@@ -2040,7 +2051,7 @@ fn run_pipeline(
             }
         );
         eprintln!(
-            "timing_ms: catalog={:.1} fast_prep={:.1} ev_scan_and_links={:.1} classify={:.1} ev_dedup={:.1} fast_dedup={:.1} cl_scan={:.1} click_route={:.1} fast_sessions={:.1} sessions_and_user_write={:.1} cleanup_and_campaign_write={:.1} total={:.1} fast={} fast_people={} qb={} l2={} siblings={}",
+            "timing_ms: catalog={:.1} fast_prep={:.1} ev_scan_and_links={:.1} classify={:.1} ev_dedup={:.1} fast_dedup={:.1} cl_scan={:.1} click_route={:.1} fast_sessions={:.1} sessions_and_user_write={:.1} cleanup_and_campaign_write={:.1} total={:.1} fast={} fast_people={} blockscan={} stage={} qb={} l2={} siblings={}",
             t_cat.as_secs_f64() * 1000.0,
             (t_fast_prep - t_cat).as_secs_f64() * 1000.0,
             (t_ev_scan - t_fast_prep).as_secs_f64() * 1000.0,
@@ -2058,6 +2069,8 @@ fn run_pipeline(
                 k.event_key, k.user_key, k.event_cap, k.person_cap
             )),
             fast_people.load(AtomicOrdering::Relaxed),
+            scan::block_scan() as u8,
+            stage::enabled() as u8,
             qb,
             l2_bytes.map_or("unknown".to_string(), |b| b.to_string()),
             siblings as u8,
