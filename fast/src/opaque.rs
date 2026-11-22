@@ -520,10 +520,17 @@ struct Group<T: Copy, const N: usize>([T; N]);
 /// Per-bucket staging: records gather in one group per bucket (cache
 /// resident) and reach the bucket's span a whole group at a time through
 /// non-temporal stores, so the scattered writes never read memory first.
+/// All spans are carved from one region (one allocation instead of one per
+/// bucket); a span that outgrows its share moves to a block of its own.
+/// (Huge pages for these regions were measured: kernel compaction made them
+/// slower and erratic, so none are requested.)
 struct Stager<T: Copy, const N: usize> {
     stage: Vec<Group<T, N>>,
     fill: Vec<u8>,
-    spans: Vec<Vec<Group<T, N>>>,
+    ptr: Vec<*mut Group<T, N>>,
+    len: Vec<u32>,
+    cap: Vec<u32>,
+    owned: Vec<(*mut u8, std::alloc::Layout)>,
 }
 
 impl<T: Copy, const N: usize> Stager<T, N> {
@@ -532,10 +539,26 @@ impl<T: Copy, const N: usize> Stager<T, N> {
 
     fn new(buckets: usize, reserve_records: usize, zero: T) -> Self {
         let () = Self::WHOLE_LINES;
+        let per = reserve_records.div_ceil(N).clamp(1, u32::MAX as usize / 2);
+        let gsize = std::mem::size_of::<Group<T, N>>();
+        let bytes = buckets.max(1) * per * gsize;
+        let align = 64;
+        let layout = std::alloc::Layout::from_size_align(bytes, align).expect("stager layout");
+        // SAFETY: non-zero size; checked for null below.
+        let region = unsafe { std::alloc::alloc(layout) };
+        if region.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+
+        let base = region as *mut Group<T, N>;
         Self {
             stage: vec![Group([zero; N]); buckets],
             fill: vec![0; buckets],
-            spans: (0..buckets).map(|_| Vec::with_capacity(reserve_records.div_ceil(N))).collect(),
+            // SAFETY: each bucket's share lies inside the region.
+            ptr: (0..buckets).map(|b| unsafe { base.add(b * per) }).collect(),
+            len: vec![0; buckets],
+            cap: vec![per as u32; buckets],
+            owned: vec![(region, layout)],
         }
     }
 
@@ -552,52 +575,92 @@ impl<T: Copy, const N: usize> Stager<T, N> {
 
     #[inline]
     fn flush(&mut self, b: usize) {
-        let span = &mut self.spans[b];
-        if span.len() == span.capacity() {
-            span.reserve(span.capacity().max(16));
+        if self.len[b] == self.cap[b] {
+            self.grow(b);
         }
-        // SAFETY: spare capacity of a 64-byte aligned buffer; whole group.
+        // SAFETY: an unused whole group of a 64-byte aligned span.
         unsafe {
-            store_group(span.as_mut_ptr().add(span.len()) as *mut u8, &self.stage[b] as *const _ as *const u8,
+            store_group(self.ptr[b].add(self.len[b] as usize) as *mut u8, &self.stage[b] as *const _ as *const u8,
                 std::mem::size_of::<Group<T, N>>());
-            span.set_len(span.len() + 1);
         }
+        self.len[b] += 1;
         self.fill[b] = 0;
     }
 
-    /// Every bucket's records in push order. The buffers are never freed
-    /// (they keep their 64-byte alignment); callers forget them.
-    fn finish(self) -> Vec<Vec<T>> {
+    /// Move bucket `b` to a block of twice its capacity.
+    #[cold]
+    fn grow(&mut self, b: usize) {
+        let cap = (self.cap[b] as usize * 2).max(16);
+        assert!(cap < u32::MAX as usize, "stager span too large");
+        let layout =
+            std::alloc::Layout::from_size_align(cap * std::mem::size_of::<Group<T, N>>(), 64).expect("stager layout");
+        // SAFETY: non-zero size; checked for null.
+        let block = unsafe { std::alloc::alloc(layout) } as *mut Group<T, N>;
+        if block.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        store_fence(); // the streamed groups are in place before they are copied
+        // SAFETY: `len` groups are initialized in the old span; the new block is larger.
+        unsafe { std::ptr::copy_nonoverlapping(self.ptr[b], block, self.len[b] as usize) };
+        self.owned.push((block as *mut u8, layout));
+        self.ptr[b] = block;
+        self.cap[b] = cap as u32;
+    }
+
+    /// Every bucket's records in push order.
+    fn finish(mut self) -> Staged<T> {
         store_fence();
-        let Self { stage, fill, spans } = self;
-        spans
-            .into_iter()
-            .enumerate()
-            .map(|(b, mut span)| {
-                let f = fill[b] as usize;
-                if f > 0 && span.len() == span.capacity() {
-                    span.reserve(1);
-                }
-                let (p, len, cap) = (span.as_mut_ptr(), span.len(), span.capacity());
-                std::mem::forget(span);
-                // SAFETY: groups are `N` contiguous records; the partial group
-                // goes to spare capacity.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(stage[b].0.as_ptr(), (p as *mut T).add(len * N), f);
-                    Vec::from_raw_parts(p as *mut T, len * N + f, cap * N)
-                }
-            })
-            .collect()
+        let mut spans = Vec::with_capacity(self.ptr.len());
+        for b in 0..self.ptr.len() {
+            let f = self.fill[b] as usize;
+            if f > 0 && self.len[b] == self.cap[b] {
+                self.grow(b);
+            }
+            let p = self.ptr[b] as *mut T;
+            // SAFETY: the partial group goes to the next unused group.
+            unsafe { std::ptr::copy_nonoverlapping(self.stage[b].0.as_ptr(), p.add(self.len[b] as usize * N), f) };
+            spans.push((p as *const T, self.len[b] as usize * N + f));
+        }
+        Staged { spans, owned: std::mem::take(&mut self.owned) }
     }
 }
 
-/// Free buffers made by `Stager::finish` with the layout they were allocated with.
-fn free_staged<T: Copy, const N: usize>(v: Vec<Vec<T>>) {
-    for mut b in v {
-        let (p, cap) = (b.as_mut_ptr(), b.capacity());
-        std::mem::forget(b);
-        // SAFETY: `finish` built this from a `Vec<Group<T, N>>` of `cap / N` groups.
-        unsafe { drop(Vec::from_raw_parts(p as *mut Group<T, N>, 0, cap / N)) }
+/// The buckets a `Stager` filled: one slice per bucket, over memory it owns.
+struct Staged<T> {
+    spans: Vec<(*const T, usize)>,
+    owned: Vec<(*mut u8, std::alloc::Layout)>,
+}
+
+// SAFETY: read-only after `finish`; the memory is owned and freed only on drop.
+unsafe impl<T: Sync> Send for Staged<T> {}
+unsafe impl<T: Sync> Sync for Staged<T> {}
+
+impl<T> Staged<T> {
+    fn empty() -> Self {
+        Self { spans: Vec::new(), owned: Vec::new() }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &[T]> + '_ {
+        (0..self.spans.len()).map(move |b| &self[b])
+    }
+}
+
+impl<T> std::ops::Index<usize> for Staged<T> {
+    type Output = [T];
+    #[inline(always)]
+    fn index(&self, b: usize) -> &[T] {
+        let (p, n) = self.spans[b];
+        // SAFETY: `n` initialized records at `p`, inside an owned block.
+        unsafe { std::slice::from_raw_parts(p, n) }
+    }
+}
+
+impl<T> Drop for Staged<T> {
+    fn drop(&mut self) {
+        for &(p, layout) in &self.owned {
+            // SAFETY: allocated by `Stager` with this layout.
+            unsafe { std::alloc::dealloc(p, layout) };
+        }
     }
 }
 
@@ -684,9 +747,9 @@ struct LRef {
 
 struct ScanOut {
     /// Filled from a `Stager` (64-byte aligned buffers): never dropped.
-    ebuckets: std::mem::ManuallyDrop<Vec<Vec<ERec>>>,
+    ebuckets: Staged<ERec>,
     /// Long event keys per event bucket (staged, never dropped).
-    lbuckets: std::mem::ManuallyDrop<Vec<Vec<LRef>>>,
+    lbuckets: Staged<LRef>,
     ev_arena: FallbackArena,
     clicks: Vec<CRec>,
     click_arena: FallbackArena,
@@ -711,6 +774,7 @@ pub fn run(
 ) -> Option<io::Result<()>> {
     COLLIDE.store(env::var("SHOPPING_OPQ_COLLIDE").ok().as_deref() == Some("1"), Ordering::Relaxed);
     DISCARD.store(env::var("SHOPPING_DISCARD").ok().as_deref() == Some("1"), Ordering::Relaxed);
+
     let window_start = catalog.window_start;
     let window_end = catalog.window_end;
     if window_end.saturating_sub(window_start) > u32::MAX as i64 || catalog.categories.len() > 256 {
@@ -723,11 +787,12 @@ pub fn run(
     let (lb, eb, cb) = (bytes_of(&link_inputs), bytes_of(&event_inputs), bytes_of(&click_inputs));
     let workers = ncpu.max(1).min(64);
 
-    // Table size from the input: about 1.4 IDs per link line, and some
-    // users that appear in no link. A table that fills up is thrown away and
-    // the scan repeats with one 4x larger (up to 2^28 slots).
+    // Table size from the input: link lines bring up to two IDs each; events
+    // and clicks repeat their users. The table stays at most about 1/4 full
+    // on generated data (probes stay short); one that fills up anyway is
+    // thrown away and the scan repeats with one 4x larger (up to 2^28 slots).
     let est_events = eb / 72 + 1;
-    let est_users = lb / 26 * 7 / 5 + eb / (64 * 48) + cb / (48 * 64) + 4096;
+    let est_users = lb / 20 * 3 / 2 + (eb / 64 + cb / 48) / 16 + 1024;
     let mut slots = (est_users * 7 / 5).next_power_of_two().max(1 << 16);
     // Measurement: SHOPPING_OPQ_SLOTS=k forces 2^k slots.
     if let Some(k) = env::var("SHOPPING_OPQ_SLOTS").ok().and_then(|v| v.parse::<u32>().ok()) {
@@ -771,8 +836,8 @@ pub fn run(
                 let mut stager: Stager<ERec, 8> = Stager::new(n_eb, reserve, zero_e);
                 let mut lstager: Stager<LRef, 12> = Stager::new(n_eb, reserve / 6 + 4, LRef { key: 0, r: 0 });
                 let mut out = ScanOut {
-                    ebuckets: std::mem::ManuallyDrop::new(Vec::new()),
-                    lbuckets: std::mem::ManuallyDrop::new(Vec::new()),
+                    ebuckets: Staged::empty(),
+                    lbuckets: Staged::empty(),
                     ev_arena: FallbackArena::new(),
                     clicks: Vec::new(),
                     click_arena: FallbackArena::new(),
@@ -992,8 +1057,8 @@ pub fn run(
                     kind_ns[kind as usize].fetch_add(tj.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
                 let tf = Instant::now();
-                out.ebuckets = std::mem::ManuallyDrop::new(stager.finish());
-                out.lbuckets = std::mem::ManuallyDrop::new(lstager.finish());
+                out.ebuckets = stager.finish();
+                out.lbuckets = lstager.finish();
                 kind_ns[1].fetch_add(tf.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 outs.lock().unwrap().push((wid, out));
             });
@@ -1007,10 +1072,7 @@ pub fn run(
     outs.sort_by_key(|(w, _)| *w);
     let outs: Vec<ScanOut> = outs.into_iter().map(|(_, o)| o).collect();
     if users.table_full.load(Ordering::Relaxed) && !out_of_range.load(Ordering::Relaxed) && slots < 1 << 28 {
-        for o in outs {
-            free_staged::<ERec, 8>(std::mem::ManuallyDrop::into_inner(o.ebuckets));
-            free_staged::<LRef, 12>(std::mem::ManuallyDrop::into_inner(o.lbuckets));
-        }
+        drop(outs);
         drop(users);
         slots <<= 2;
         retries += 1;
@@ -1023,10 +1085,7 @@ pub fn run(
         if timing() {
             eprintln!("opaque: limits exceeded, exact solver");
         }
-        for o in outs {
-            free_staged::<ERec, 8>(std::mem::ManuallyDrop::into_inner(o.ebuckets));
-            free_staged::<LRef, 12>(std::mem::ManuallyDrop::into_inner(o.lbuckets));
-        }
+        drop(outs);
         return None;
     }
     break (users, outs);
@@ -1118,12 +1177,12 @@ pub fn run(
     if outs.iter().any(|o| o.ebuckets.iter().any(|v| v.len() >= 1 << 26)) || outs.len() > 64 {
         return None;
     }
-    let n_records: usize = outs.iter().map(|o| o.ebuckets.iter().map(Vec::len).sum::<usize>()).sum();
+    let n_records: usize = outs.iter().map(|o| o.ebuckets.iter().map(|v| v.len()).sum::<usize>()).sum();
     let per_person = (n_records / n_persons.max(1)).max(1);
     let pbits = ((env_usize("SHOPPING_OPQ_PB", PERSON_TARGET) / per_person).max(1).next_power_of_two().trailing_zeros()).min(20);
     let n_pb = (n_persons >> pbits) + 1;
     let next_eb = AtomicUsize::new(0);
-    let dedup_out: Mutex<Vec<std::mem::ManuallyDrop<Vec<Vec<PRec>>>>> = Mutex::new(Vec::with_capacity(workers));
+    let dedup_out: Mutex<Vec<Staged<PRec>>> = Mutex::new(Vec::with_capacity(workers));
     let long_mismatch = AtomicBool::new(false);
     let max_bucket = (0..n_eb).map(|b| outs.iter().map(|o| o.ebuckets[b].len()).sum::<usize>()).max().unwrap_or(0);
     thread::scope(|scope| {
@@ -1133,9 +1192,9 @@ pub fn run(
                 // At most 2/3 full: the bucket's records over a power of two >= 1.5x.
                 let tsize = (max_bucket * 3 / 2 + 1).next_power_of_two().max(16);
                 let tmask = tsize - 1;
-                // (key, record index, ingest); key 0 = empty (keys are never 0)
-                let mut table: Vec<(u64, u32, u32)> = vec![(0, 0, 0); tsize];
-                let mut occupied: Vec<u32> = Vec::with_capacity(max_bucket);
+                // The winning copy of each key, in place; key 0 = empty (keys are
+                // never 0). The output pass walks the table in order.
+                let mut table: Vec<ERec> = vec![ERec { key: 0, ingest: 0, u: 0, ts: 0, pc: 0 }; tsize];
                 let per_pb = n_records / n_pb.max(1) / workers.max(1) * 5 / 4 + 16;
                 let mut pstage: Stager<PRec, 16> = Stager::new(n_pb, per_pb, PRec { p: 0, ts: 0, pc: 0 });
                 // Long-key check: (key, worker, arena offset), cleared through `vused`.
@@ -1147,23 +1206,19 @@ pub fn run(
                         break;
                     }
                     let mut long_hit = false;
-                    occupied.clear();
-                    for (w, o) in outs.iter().enumerate() {
-                        for (i, r) in o.ebuckets[b].iter().enumerate() {
-                            let idx = ((w as u32) << 26) | i as u32;
+                    for o in outs.iter() {
+                        for r in o.ebuckets[b].iter() {
                             let mut s = (mix64(r.key) as usize) & tmask;
                             loop {
                                 let e = &mut table[s];
-                                if e.0 == 0 {
-                                    *e = (r.key, idx, r.ingest);
-                                    occupied.push(s as u32);
+                                if e.key == 0 {
+                                    *e = *r;
                                     break;
                                 }
-                                if e.0 == r.key {
+                                if e.key == r.key {
                                     long_hit |= r.key & LONG != 0;
-                                    if r.ingest < e.2 {
-                                        e.1 = idx;
-                                        e.2 = r.ingest;
+                                    if r.ingest < e.ingest {
+                                        *e = *r; // equal ingest: copies are identical, keep the first
                                     }
                                     break;
                                 }
@@ -1210,30 +1265,29 @@ pub fn run(
                             vtable[s as usize].0 = 0;
                         }
                     }
-                    let rec = |idx: u32| &outs[(idx >> 26) as usize].ebuckets[b][(idx & ((1 << 26) - 1)) as usize];
-                    const AHEAD: usize = 12;
-                    for k in 0..occupied.len() {
-                        if let Some(&s2) = occupied.get(k + AHEAD) {
-                            let r2 = rec(table[s2 as usize].1);
-                            if r2.u != INVALID {
-                                prefetch_ptr(&p_of[r2.u as usize]);
+                    const AHEAD: usize = 16;
+                    for s in 0..tsize {
+                        if let Some(e2) = table.get(s + AHEAD) {
+                            if e2.key != 0 && e2.u != INVALID {
+                                prefetch_ptr(&p_of[e2.u as usize]);
                             }
                         }
-                        let e = &mut table[occupied[k] as usize];
-                        let r = rec(e.1);
-                        e.0 = 0;
-                        if r.u != INVALID {
-                            let p = p_of[r.u as usize].load(Ordering::Relaxed);
-                            pstage.push((p >> pbits) as usize, PRec { p, ts: r.ts, pc: r.pc });
+                        let e = &mut table[s];
+                        if e.key == 0 {
+                            continue;
                         }
+                        if e.u != INVALID {
+                            let p = p_of[e.u as usize].load(Ordering::Relaxed);
+                            pstage.push((p >> pbits) as usize, PRec { p, ts: e.ts, pc: e.pc });
+                        }
+                        e.key = 0;
                     }
                     for o in outs.iter() {
-                        discard(&o.ebuckets[b], o.ebuckets[b].capacity());
-                        discard(&o.lbuckets[b], o.lbuckets[b].capacity());
+                        discard(&o.ebuckets[b], o.ebuckets[b].len());
+                        discard(&o.lbuckets[b], o.lbuckets[b].len());
                     }
                 }
-                let pbuckets = std::mem::ManuallyDrop::new(pstage.finish());
-                dedup_out.lock().unwrap().push(pbuckets);
+                dedup_out.lock().unwrap().push(pstage.finish());
             });
         }
     });
@@ -1249,8 +1303,8 @@ pub fn run(
     let t_verify = t0.elapsed();
 
     // Clicks by person bucket.
-    // Staged like the event records (never dropped: `ManuallyDrop`).
-    let click_parts: Vec<std::mem::ManuallyDrop<Vec<Vec<CRec>>>> = thread::scope(|scope| {
+    // Staged like the event records.
+    let click_parts: Vec<Staged<CRec>> = thread::scope(|scope| {
         let handles: Vec<_> = outs
             .iter()
             .map(|o| {
@@ -1266,7 +1320,7 @@ pub fn run(
                         cb.push((p >> pbits) as usize, CRec { u: p, ..*c });
                     }
                     discard(&o.clicks, o.clicks.capacity());
-                    std::mem::ManuallyDrop::new(cb.finish())
+                    cb.finish()
                 })
             })
             .collect();
@@ -1390,10 +1444,10 @@ pub fn run(
                     }
                     t_sink += tm.elapsed().as_secs_f64();
                     for v in dedup_out {
-                        discard(&v[pb], v[pb].capacity());
+                        discard(&v[pb], v[pb].len());
                     }
                     for part in click_parts {
-                        discard(&part[pb], part[pb].capacity());
+                        discard(&part[pb], part[pb].len());
                     }
                 }
                 let tw = Instant::now();
@@ -1564,7 +1618,26 @@ mod tests {
         for b in 0..5 {
             assert_eq!(got[b].iter().map(|r| r.key).collect::<Vec<_>>(), want[b]);
         }
-        std::mem::forget(got);
+        drop(got);
+    }
+
+    #[test]
+    fn stager_spans_that_outgrow_their_share_keep_every_record() {
+        // A reserve of one group per bucket, then thousands of records in a few
+        // buckets: spans move to blocks of their own, repeatedly.
+        let zero = PRec { p: 0, ts: 0, pc: 0 };
+        let mut st: Stager<PRec, 16> = Stager::new(7, 1, zero);
+        let mut want: Vec<Vec<u32>> = vec![Vec::new(); 7];
+        for i in 0..20_000u32 {
+            let b = if i % 3 == 0 { 1 } else if i % 5 == 0 { 6 } else { (i % 7) as usize };
+            st.push(b, PRec { p: i, ts: i, pc: 0 });
+            want[b].push(i);
+        }
+        let got = st.finish();
+        for b in 0..7 {
+            assert_eq!(got[b].iter().map(|r| r.p).collect::<Vec<_>>(), want[b], "bucket {b}");
+        }
+        assert_eq!(got.iter().map(|v| v.len()).sum::<usize>(), 20_000);
     }
 
     #[test]

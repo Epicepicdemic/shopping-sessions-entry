@@ -18,7 +18,7 @@ The default run is `fast/src/opaque.rs`. It treats every ID as an opaque string 
 - **One pass over all input.** Links, events and clicks are read in parallel. Each user ID is interned into a dense index in a lock-free table; each link line joins its two indices in a concurrent union-find. Each event copy is filed under a bucket of its event key with its ingest time, user index and validated fields; each valid click is kept with its user index.
 - **Persons.** Each link component is a person named by its byte-wise smallest ID; every other ID is a person of its own.
 - **Dedup, then sessions.** Each event bucket keeps, per event ID, the copy with the smallest ingest time (dedup before validation), and files the surviving valid events by person. A bucket where two long event keys match compares the bytes of its long IDs. Each person bucket is then sessionized by the same code the exact solver uses (`fast/src/sink.rs`).
-- **Memory.** Records go to their buckets through cache-line staging with non-temporal stores.
+- **Memory.** Records go to their buckets through cache-line staging with non-temporal stores, into spans carved from one region per worker. Each event bucket's dedup table holds the winning copy itself and is read back in order.
 - **Limits.** A user table that fills up is discarded and the scan repeats with one four times larger. Other input outside the engine's limits (a window longer than 49 days, more than 256 categories, an ingest time more than 68 years from the window, colliding hashes, or two different long event IDs with the same key) makes it stop before writing anything, and the exact solver runs instead. `SHOPPING_OPAQUE=0` runs the exact solver alone.
 
 ## The generator, and the older fast path
