@@ -76,6 +76,17 @@ fn id_key(bytes: &[u8]) -> u64 {
     }
 }
 
+/// `id_key` for event IDs, with a test hook (`SHOPPING_OPQ_COLLIDE=1`): every
+/// long event ID gets one key, so different IDs share a key and the bucket
+/// check must send the run to the exact solver.
+#[inline(always)]
+fn event_key(bytes: &[u8]) -> u64 {
+    let k = id_key(bytes);
+    if k & LONG != 0 && COLLIDE.load(Ordering::Relaxed) { LONG | 1 } else { k }
+}
+
+static COLLIDE: AtomicBool = AtomicBool::new(false);
+
 unsafe extern "C" {
     fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
 }
@@ -197,7 +208,7 @@ struct Users {
     max_used: usize,
     arenas: Arenas,
     overflow: AtomicBool,
-    /// The table itself ran out of room (a larger table may succeed).
+    /// The table held more IDs than its size allows (a larger table succeeds).
     table_full: AtomicBool,
 }
 
@@ -370,7 +381,8 @@ impl Users {
             i = (i + 1) & self.mask;
             probes += 1;
             if probes > 1024 || (probes & 15 == 0 && self.overflow.load(Ordering::Relaxed)) {
-                self.table_full.store(true, Ordering::Relaxed);
+                // A chain this long at 3/4 load means colliding hashes, which
+                // a larger table does not fix: the exact solver runs.
                 self.overflow.store(true, Ordering::Relaxed);
                 return INVALID;
             }
@@ -640,46 +652,20 @@ struct PRec {
     pc: u32,
 }
 
-/// A small set of u64 keys (open addressing; 0 is never a key here).
-struct KeySet {
-    keys: Vec<u64>,
-    mask: usize,
-}
-
-impl KeySet {
-    fn new(keys: &[u64]) -> Self {
-        let size = (keys.len() * 2).next_power_of_two().max(16);
-        let mut s = Self { keys: vec![0; size], mask: size - 1 };
-        for &k in keys {
-            let mut i = (mix64(k) as usize) & s.mask;
-            while s.keys[i] != 0 && s.keys[i] != k {
-                i = (i + 1) & s.mask;
-            }
-            s.keys[i] = k;
-        }
-        s
-    }
-
-    #[inline]
-    fn contains(&self, k: u64) -> bool {
-        let mut i = (mix64(k) as usize) & self.mask;
-        loop {
-            let x = self.keys[i];
-            if x == k {
-                return true;
-            }
-            if x == 0 {
-                return false;
-            }
-            i = (i + 1) & self.mask;
-        }
-    }
+/// A long event key and where its bytes are (`ev_arena` offset), filed in the
+/// event's bucket so that matching keys can be checked there (16 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LRef {
+    key: u64,
+    r: u64,
 }
 
 struct ScanOut {
     /// Filled from a `Stager` (64-byte aligned buffers): never dropped.
     ebuckets: std::mem::ManuallyDrop<Vec<Vec<ERec>>>,
-    long_events: Vec<(u64, u64)>,
+    /// Long event keys per event bucket (staged, never dropped).
+    lbuckets: std::mem::ManuallyDrop<Vec<Vec<LRef>>>,
     ev_arena: FallbackArena,
     clicks: Vec<CRec>,
     click_arena: FallbackArena,
@@ -702,6 +688,7 @@ pub fn run(
     t0: Instant,
     t_cat: std::time::Duration,
 ) -> Option<io::Result<()>> {
+    COLLIDE.store(env::var("SHOPPING_OPQ_COLLIDE").ok().as_deref() == Some("1"), Ordering::Relaxed);
     let window_start = catalog.window_start;
     let window_end = catalog.window_end;
     if window_end.saturating_sub(window_start) > u32::MAX as i64 || catalog.categories.len() > 256 {
@@ -716,7 +703,7 @@ pub fn run(
 
     // Table size from the input: about 1.4 IDs per link line, and some
     // users that appear in no link. A table that fills up is thrown away and
-    // the scan repeats with one 4x larger (up to 2^30 slots).
+    // the scan repeats with one 4x larger (up to 2^28 slots).
     let est_events = eb / 72 + 1;
     let est_users = lb / 26 * 7 / 5 + eb / (64 * 48) + cb / (48 * 64) + 4096;
     let mut slots = (est_users * 7 / 5).next_power_of_two().max(1 << 16);
@@ -760,9 +747,10 @@ pub fn run(
                 let zero_e = ERec { key: 0, ingest: 0, u: 0, ts: 0, pc: 0 };
                 let zero_c = CRec { ts: 0, cid: 0, u: 0, camp: 0 };
                 let mut stager: Stager<ERec, 8> = Stager::new(n_eb, reserve, zero_e);
+                let mut lstager: Stager<LRef, 12> = Stager::new(n_eb, reserve / 6 + 4, LRef { key: 0, r: 0 });
                 let mut out = ScanOut {
                     ebuckets: std::mem::ManuallyDrop::new(Vec::new()),
-                    long_events: Vec::new(),
+                    lbuckets: std::mem::ManuallyDrop::new(Vec::new()),
                     ev_arena: FallbackArena::new(),
                     clicks: Vec::new(),
                     click_arena: FallbackArena::new(),
@@ -911,17 +899,17 @@ pub fn run(
                                     }
                                 }
                             }
-                            let key = id_key(event_id);
+                            let key = event_key(event_id);
+                            let b = ebucket(key);
                             if key & LONG != 0 {
                                 let r = out.ev_arena.push_fallback(event_id);
-                                out.long_events.push((key, r.0));
+                                lstager.push(b, LRef { key, r: r.0 });
                             }
                             let ing = ingest_ts.div_euclid(1000) - ingest_base;
                             if !(0..=u32::MAX as i64).contains(&ing) {
                                 out_of_range.store(true, Ordering::Relaxed);
                                 return;
                             }
-                            let b = ebucket(key);
                             let (u, ts_off) = if valid { (0, (ts_val - window_start) as u32) } else { (INVALID, 0) };
                             let r = ERec { key, ingest: ing as u32, u, ts: ts_off, pc: (price_val << 8) | cat_id };
                             if valid {
@@ -983,6 +971,7 @@ pub fn run(
                 }
                 let tf = Instant::now();
                 out.ebuckets = std::mem::ManuallyDrop::new(stager.finish());
+                out.lbuckets = std::mem::ManuallyDrop::new(lstager.finish());
                 kind_ns[1].fetch_add(tf.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 outs.lock().unwrap().push((wid, out));
             });
@@ -995,9 +984,10 @@ pub fn run(
     let mut outs = outs.into_inner().unwrap();
     outs.sort_by_key(|(w, _)| *w);
     let outs: Vec<ScanOut> = outs.into_iter().map(|(_, o)| o).collect();
-    if users.table_full.load(Ordering::Relaxed) && !out_of_range.load(Ordering::Relaxed) && slots < 1 << 30 {
+    if users.table_full.load(Ordering::Relaxed) && !out_of_range.load(Ordering::Relaxed) && slots < 1 << 28 {
         for o in outs {
             free_staged::<ERec, 8>(std::mem::ManuallyDrop::into_inner(o.ebuckets));
+            free_staged::<LRef, 12>(std::mem::ManuallyDrop::into_inner(o.lbuckets));
         }
         drop(users);
         slots <<= 2;
@@ -1013,6 +1003,7 @@ pub fn run(
         }
         for o in outs {
             free_staged::<ERec, 8>(std::mem::ManuallyDrop::into_inner(o.ebuckets));
+            free_staged::<LRef, 12>(std::mem::ManuallyDrop::into_inner(o.lbuckets));
         }
         return None;
     }
@@ -1110,12 +1101,12 @@ pub fn run(
     let pbits = ((env_usize("SHOPPING_OPQ_PB", PERSON_TARGET) / per_person).max(1).next_power_of_two().trailing_zeros()).min(20);
     let n_pb = (n_persons >> pbits) + 1;
     let next_eb = AtomicUsize::new(0);
-    let dedup_out: Mutex<Vec<(std::mem::ManuallyDrop<Vec<Vec<PRec>>>, Vec<u64>)>> =
-        Mutex::new(Vec::with_capacity(workers));
+    let dedup_out: Mutex<Vec<std::mem::ManuallyDrop<Vec<Vec<PRec>>>>> = Mutex::new(Vec::with_capacity(workers));
+    let long_mismatch = AtomicBool::new(false);
     let max_bucket = (0..n_eb).map(|b| outs.iter().map(|o| o.ebuckets[b].len()).sum::<usize>()).max().unwrap_or(0);
     thread::scope(|scope| {
         for _ in 0..workers {
-            let (outs, p_of, next_eb, dedup_out) = (&outs, &p_of, &next_eb, &dedup_out);
+            let (outs, p_of, next_eb, dedup_out, long_mismatch) = (&outs, &p_of, &next_eb, &dedup_out, &long_mismatch);
             scope.spawn(move || {
                 // At most 2/3 full: the bucket's records over a power of two >= 1.5x.
                 let tsize = (max_bucket * 3 / 2 + 1).next_power_of_two().max(16);
@@ -1125,12 +1116,15 @@ pub fn run(
                 let mut occupied: Vec<u32> = Vec::with_capacity(max_bucket);
                 let per_pb = n_records / n_pb.max(1) / workers.max(1) * 5 / 4 + 16;
                 let mut pstage: Stager<PRec, 16> = Stager::new(n_pb, per_pb, PRec { p: 0, ts: 0, pc: 0 });
-                let mut verify: Vec<u64> = Vec::new();
+                // Long-key check: (key, worker, arena offset), cleared through `vused`.
+                let mut vtable: Vec<(u64, u32, u64)> = Vec::new();
+                let mut vused: Vec<u32> = Vec::new();
                 loop {
                     let b = next_eb.fetch_add(1, Ordering::Relaxed);
                     if b >= n_eb {
                         break;
                     }
+                    let mut long_hit = false;
                     occupied.clear();
                     for (w, o) in outs.iter().enumerate() {
                         for (i, r) in o.ebuckets[b].iter().enumerate() {
@@ -1144,9 +1138,7 @@ pub fn run(
                                     break;
                                 }
                                 if e.0 == r.key {
-                                    if r.key & LONG != 0 {
-                                        verify.push(r.key);
-                                    }
+                                    long_hit |= r.key & LONG != 0;
                                     if r.ingest < e.2 {
                                         e.1 = idx;
                                         e.2 = r.ingest;
@@ -1155,6 +1147,45 @@ pub fn run(
                                 }
                                 s = (s + 1) & tmask;
                             }
+                        }
+                    }
+                    if long_hit {
+                        // Two long copies shared a key: every long key here must
+                        // have one byte string, or the run goes to the exact solver.
+                        let n_l: usize = outs.iter().map(|o| o.lbuckets[b].len()).sum();
+                        let vsize = (n_l * 2).next_power_of_two().max(16);
+                        if vtable.len() < vsize {
+                            vtable = vec![(0, 0, 0); vsize];
+                        }
+                        let vmask = vsize - 1;
+                        let bytes = |w: usize, r: u64| -> &[u8] {
+                            let a = &outs[w].ev_arena.bytes;
+                            let (off, len) = PackedId(r).fallback_span(a);
+                            &a[off..off + len]
+                        };
+                        vused.clear();
+                        for (w, o) in outs.iter().enumerate() {
+                            for lr in o.lbuckets[b].iter() {
+                                let mut s = (mix64(lr.key) as usize) & vmask;
+                                loop {
+                                    let e = &mut vtable[s];
+                                    if e.0 == 0 {
+                                        *e = (lr.key, w as u32, lr.r);
+                                        vused.push(s as u32);
+                                        break;
+                                    }
+                                    if e.0 == lr.key {
+                                        if bytes(e.1 as usize, e.2) != bytes(w, lr.r) {
+                                            long_mismatch.store(true, Ordering::Relaxed);
+                                        }
+                                        break;
+                                    }
+                                    s = (s + 1) & vmask;
+                                }
+                            }
+                        }
+                        for &s in &vused {
+                            vtable[s as usize].0 = 0;
                         }
                     }
                     let rec = |idx: u32| &outs[(idx >> 26) as usize].ebuckets[b][(idx & ((1 << 26) - 1)) as usize];
@@ -1176,47 +1207,18 @@ pub fn run(
                     }
                 }
                 let pbuckets = std::mem::ManuallyDrop::new(pstage.finish());
-                dedup_out.lock().unwrap().push((pbuckets, verify));
+                dedup_out.lock().unwrap().push(pbuckets);
             });
         }
     });
     let dedup_out = dedup_out.into_inner().unwrap();
     let t_dedup = t0.elapsed();
 
-    // Long event keys that matched: every copy must have the same bytes.
-    let verify: Vec<u64> = dedup_out.iter().flat_map(|(_, v)| v.iter().copied()).collect();
-    if !verify.is_empty() {
-        let set = KeySet::new(&verify);
-        let found: Mutex<Vec<(u64, usize, u64)>> = Mutex::new(Vec::new());
-        thread::scope(|scope| {
-            for (w, o) in outs.iter().enumerate() {
-                let (set, found) = (&set, &found);
-                scope.spawn(move || {
-                    let mine: Vec<(u64, usize, u64)> = o
-                        .long_events
-                        .iter()
-                        .filter(|(k, _)| set.contains(*k))
-                        .map(|&(k, r)| (k, w, r))
-                        .collect();
-                    found.lock().unwrap().extend(mine);
-                });
-            }
-        });
-        let mut found = found.into_inner().unwrap();
-        found.sort_unstable_by_key(|x| x.0);
-        let bytes_of = |&(_, w, r): &(u64, usize, u64)| -> &[u8] {
-            let (off, len) = PackedId(r).fallback_span(&outs[w].ev_arena.bytes);
-            &outs[w].ev_arena.bytes[off..off + len]
-        };
-        for run in found.chunk_by(|a, b| a.0 == b.0) {
-            let first = bytes_of(&run[0]);
-            if run[1..].iter().any(|x| bytes_of(x) != first) {
-                if timing() {
-                    eprintln!("opaque: long event key shared by different IDs, exact solver");
-                }
-                return None;
-            }
+    if long_mismatch.load(Ordering::Relaxed) {
+        if timing() {
+            eprintln!("opaque: long event key shared by different IDs, exact solver");
         }
+        return None;
     }
     let t_verify = t0.elapsed();
 
@@ -1254,7 +1256,7 @@ pub fn run(
     };
     let base_day = window_start.div_euclid(MS_PER_DAY) as i32;
     let mut order: Vec<(usize, usize)> = (0..n_pb)
-        .map(|pb| (dedup_out.iter().map(|(v, _)| v[pb].len()).sum::<usize>(), pb))
+        .map(|pb| (dedup_out.iter().map(|v| v[pb].len()).sum::<usize>(), pb))
         .collect();
     order.sort_unstable_by(|a, b| b.cmp(a));
     let global_camp_grid: Mutex<Vec<CampAcc>> = Mutex::new(vec![CampAcc::default(); num_campaigns * window_days]);
@@ -1299,7 +1301,7 @@ pub fn run(
                     let base = (pb << pbits) as u32;
                     ecount.iter_mut().for_each(|c| *c = 0);
                     ccount.iter_mut().for_each(|c| *c = 0);
-                    for (v, _) in dedup_out {
+                    for v in dedup_out {
                         for r in &v[pb] {
                             ecount[(r.p - base) as usize + 1] += 1;
                         }
@@ -1316,7 +1318,7 @@ pub fn run(
                     evs.clear();
                     evs.resize(n_ev, (0, 0, 0));
                     let mut epos: Vec<u32> = ecount[..span_p].to_vec();
-                    for (v, _) in dedup_out {
+                    for v in dedup_out {
                         for r in &v[pb] {
                             let lp = (r.p - base) as usize;
                             evs[epos[lp] as usize] = (window_start + r.ts as i64, r.pc >> 8, r.pc & 255);
@@ -1589,12 +1591,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn key_set_finds_exactly_its_keys() {
-        let keys: Vec<u64> = (1..5000u64).map(|i| mix64(i) | 1).collect();
-        let set = KeySet::new(&keys[..2500]);
-        for (i, &k) in keys.iter().enumerate() {
-            assert_eq!(set.contains(k), i < 2500);
-        }
-    }
 }
