@@ -1248,21 +1248,24 @@ pub fn run(
     let t_verify = t0.elapsed();
 
     // Clicks by person bucket.
-    let click_parts: Vec<Vec<Vec<CRec>>> = thread::scope(|scope| {
+    // Staged like the event records (never dropped: `ManuallyDrop`).
+    let click_parts: Vec<std::mem::ManuallyDrop<Vec<Vec<CRec>>>> = thread::scope(|scope| {
         let handles: Vec<_> = outs
             .iter()
             .map(|o| {
                 let p_of = &p_of;
                 scope.spawn(move || {
-                    let mut cb: Vec<Vec<CRec>> = (0..n_pb).map(|_| Vec::new()).collect();
+                    let zero = CRec { ts: 0, cid: 0, u: 0, camp: 0 };
+                    let mut cb: Stager<CRec, 8> = Stager::new(n_pb, o.clicks.len() / n_pb.max(1) * 5 / 4 + 8, zero);
                     for (k, c) in o.clicks.iter().enumerate() {
                         if let Some(c2) = o.clicks.get(k + 16) {
                             prefetch_ptr(&p_of[c2.u as usize]);
                         }
                         let p = p_of[c.u as usize].load(Ordering::Relaxed);
-                        cb[(p >> pbits) as usize].push(CRec { u: p, ..*c });
+                        cb.push((p >> pbits) as usize, CRec { u: p, ..*c });
                     }
-                    cb
+                    discard(&o.clicks, o.clicks.capacity());
+                    std::mem::ManuallyDrop::new(cb.finish())
                 })
             })
             .collect();
