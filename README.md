@@ -23,7 +23,7 @@ docker run --rm --platform linux/amd64 --read-only --network none --user 1000:10
   -v "$PWD/work/output:/output" shopping-w4
 ```
 
-The image uses Alpine musl and a static x86-64-v2 executable. The scanner selects AVX-512BW or AVX2 after checking CPU and OS support. ARM64 builds use NEON. The CSV parser also provides a scalar path.
+The image sets `W4_IO=pread`, so it reads input with positioned reads instead of memory mapping; `-e W4_IO=mmap` restores mapping. The image uses Alpine musl and a static x86-64-v2 executable. The scanner selects AVX-512BW or AVX2 after checking CPU and OS support. ARM64 builds use NEON. The CSV parser also provides a scalar path.
 
 ## Native macOS build
 

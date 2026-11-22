@@ -7,5 +7,6 @@ RUN g++ -std=c++20 -O3 -DNDEBUG -march=x86-64-v2 -mtune=generic -flto -pthread -
 
 FROM scratch
 COPY --from=build /shopping-w4 /app/shopping-w4
+ENV W4_IO=pread
 USER 1000:1000
 ENTRYPOINT ["/app/shopping-w4"]
