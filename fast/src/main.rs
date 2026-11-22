@@ -622,9 +622,11 @@ struct PersonEventBatch {
 /// and classify person slots from the actual links. `None` disables the fast
 /// path (everything then takes the exact solver).
 fn prepare_fast(catalog: &Catalog, inputs: &scan::Inputs, ncpu: usize) -> Option<(Keys, People)> {
-    // The fast record holds a 16-bit category and a 40-bit window offset (34.8
-    // years of ms); beyond those the exact solver runs everything.
-    if env::var("SHOPPING_FAST").ok().as_deref() == Some("0")
+    // Off unless SHOPPING_FAST=1: since the v5 data (opaque, keyed IDs) the
+    // generator keys cannot be recovered, and the search for them only costs
+    // time. The fast record holds a 16-bit category and a 40-bit window offset
+    // (34.8 years of ms); beyond those the exact solver runs everything.
+    if env::var("SHOPPING_FAST").ok().as_deref() != Some("1")
         || catalog.categories.len() > 65_536
         || catalog.window_end.saturating_sub(catalog.window_start) > fastpath::M40 as i64
     {

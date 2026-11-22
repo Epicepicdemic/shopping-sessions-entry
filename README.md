@@ -12,6 +12,8 @@ The generated data sets are not in the repository.
 
 ## The generator, and what the fast path relies on
 
+The fast path is off by default. The v5 data passes every ID through a keyed bijection and gives one in eight IDs a 32-character hexadecimal suffix, so the decoding below no longer applies, and the default run is the exact solver alone. `SHOPPING_FAST=1` turns the fast path on for data from the earlier generator.
+
 We used the organisers' dataset generator (`generator.zip`, Rust; not included here) to make test data, and we read its source. The fast path is built on its ID encoding:
 
 - The generator writes each event and user ID as a prefix plus the base-36 form of a 40-bit scramble of a counter. The scramble uses two fixed multipliers and a secret key per data set. The fast path contains the inverse of that scramble, with the generator's two multipliers, and recovers the keys from a sample of the input at startup.
@@ -21,7 +23,7 @@ We used the organisers' dataset generator (`generator.zip`, Rust; not included h
   - all of a person's events fall in one counter bucket (all copies of an event share a counter, so they always do).
 - A row or person that fails a check goes to the exact solver. So does a whole input whose IDs are not in this form, or whose keys are not found.
 
-The exact solver does not use the generator's encoding; it implements the rules for any IDs. Output is the same on either path; the fast path only changes speed. `SHOPPING_FAST=0` runs the exact solver alone.
+The exact solver does not use the generator's encoding; it implements the rules for any IDs. Output is the same on either path; the fast path only changes speed.
 
 ## Third-party code and libraries
 
@@ -52,7 +54,7 @@ Switches, for measurement:
 | Switch | Effect |
 |---|---|
 | `SHOPPING_TIMING=1` | Logs stage times, the build and bucket width chosen, and peak RSS to stderr. |
-| `SHOPPING_FAST=0` | Runs the exact solver only. |
+| `SHOPPING_FAST=1` | Turns on the fast path (data from the earlier generator only). The default is the exact solver alone. |
 | `SHOPPING_COMPACT_LINKS=0` | Builds the full exact link graph instead of the compact one (fast path only). |
 | `SHOPPING_BUILD=portable` or `v4` | Forces a build. The default is v3 when the CPU has it. |
 | `SHOPPING_QB=13`..`16` | Forces the bucket width. The default comes from the CPU's L2 size. |
