@@ -1,1 +1,0 @@
-Clicks step 7: "A session is assisted by every campaign with at least one of the person's valid clicks with `session_start - 7 days <= click.ts <= session_start`"; campaign_daily: "A campaign that only assisted that day has a row with 0 in the three credited columns."

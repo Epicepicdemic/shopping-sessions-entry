@@ -1,0 +1,32 @@
+   Device Identifier:         disk24
+   Device Node:               /dev/disk24
+   Whole:                     Yes
+   Part of Whole:             disk24
+   Device / Media Name:       Disk Image
+
+   Volume Name:               Not applicable (no file system)
+   Mounted:                   Not applicable (no file system)
+   File System:               None
+
+   Content (IOContent):       None
+   OS Can Be Installed:       No
+   Media Type:                Generic
+   Protocol:                  Disk Image
+   SMART Status:              Not Supported
+
+   Disk Size:                 6.7 GB (6710886400 Bytes) (exactly 13107200 512-Byte-Units)
+   Device Block Size:         512 Bytes
+
+   Media OS Use Only:         No
+   Media Read-Only:           No
+   Volume Read-Only:          Not applicable (no file system)
+
+   Device Location:           External
+   Removable Media:           Removable
+   Media Removal:             Software-Activated
+
+   Solid State:               Info not available
+   Virtual:                   Yes
+
+Initialized /dev/rdisk24 as a 6 GB case-insensitive HFS Plus volume
+Volume Wave4InputRAM on /dev/disk24 mounted

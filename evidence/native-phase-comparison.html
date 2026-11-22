@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wave-4 phase changes</title>
+<style>
+  body { margin: 0; color: var(--foreground, CanvasText); font: 13px var(--font-sans, system-ui); }
+  figure { margin: 0; }
+  figcaption { color: var(--foreground, CanvasText); font-weight: 600; margin-bottom: 10px; }
+  .legend { display: flex; gap: 14px; margin-bottom: 10px; color: var(--muted-foreground, GrayText); }
+  .legend span, .value { display: flex; align-items: center; gap: 6px; }
+  .dot { background: var(--series); width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .small { --series: var(--chart-1, CanvasText); }
+  .large { --series: var(--chart-2, GrayText); }
+  .rows { display: grid; grid-template-columns: minmax(82px, 22%) minmax(105px, 1fr) 57px; }
+  .label { align-content: center; padding-right: 7px; }
+  .label, .plot, .values { height: 43px; box-sizing: border-box; border-bottom: 1px solid var(--border, GrayText); }
+  .plot, .values { position: relative; display: flex; flex-direction: column; justify-content: center; gap: 5px; }
+  .plot::before { content: ""; position: absolute; inset: 0 20% 0 auto; border-left: 1px solid var(--border, GrayText); }
+  .bar-track { height: 10px; position: relative; }
+  .bar { position: absolute; top: 0; left: var(--start); height: 10px; width: var(--extent); background: var(--series); border-radius: 2px; }
+  .values { padding-left: 7px; font: 11px var(--font-mono, monospace); }
+  .axis { position: relative; height: 20px; color: var(--muted-foreground, GrayText); font-size: 10px; }
+  .axis span { position: absolute; top: 3px; transform: translateX(-50%); }
+  .axis span:first-child { left: 0; transform: none; }
+  .axis span:nth-child(2) { left: 40%; }
+  .axis span:nth-child(3) { left: 80%; }
+  .axis span:last-child { left: 100%; transform: translateX(-100%); }
+</style>
+</head>
+<body>
+<figure aria-label="Change in median native phase time from Wave-3 to Wave-4">
+  <figcaption>Change in median native phase time</figcaption>
+  <div class="legend"><span class="small"><i class="dot"></i>20M</span><span class="large"><i class="dot"></i>60M</span></div>
+  <div class="rows"></div>
+</figure>
+<script>
+  const phases = [
+    ["CSV scan", 221.929, 203.371, 797.447, 791.786],
+    ["Event dedup", 62.742, 45.314, 309.336, 165.102],
+    ["Alias grouping", 58.263, 55.977, 342.382, 238.645],
+    ["Reduction + Parquet", 60.171, 63.990, 232.281, 248.245],
+  ];
+  const rows = document.querySelector(".rows");
+  const append = (parent, className, value) => {
+    const element = document.createElement("div");
+    element.className = className;
+    if (value) element.textContent = value;
+    parent.appendChild(element);
+    return element;
+  };
+  for (const [phase, w3Small, w4Small, w3Large, w4Large] of phases) {
+    append(rows, "label", phase);
+    const plot = append(rows, "plot");
+    const values = append(rows, "values");
+    for (const [scale, before, after] of [["small", w3Small, w4Small], ["large", w3Large, w4Large]]) {
+      const change = 100 * (after / before - 1);
+      const bar = append(append(plot, "bar-track"), "bar " + scale);
+      bar.style.setProperty("--start", (80 + Math.min(0, change) * 1.6) + "%");
+      bar.style.setProperty("--extent", Math.max(0.65, Math.abs(change) * 1.6) + "%");
+      const label = (change > 0 ? "+" : "−") + Math.abs(change).toFixed(1) + "%";
+      append(values, "value " + scale, label);
+    }
+  }
+  append(rows, "");
+  append(rows, "axis").innerHTML = "<span>−50%</span><span>−25%</span><span>0%</span><span>+12.5%</span>";
+</script>
+</body>
+</html>

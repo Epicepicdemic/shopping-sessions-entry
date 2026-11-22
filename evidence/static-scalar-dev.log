@@ -1,0 +1,7 @@
+w4 scanner=scalar workers=8 event_bits=6 user_bits=6 time=compact sync=0 input_bytes=103584969 user_rows=118107 campaign_rows=27449 peak_rss_bytes=220590080 minor_faults=19789 major_faults=196
+w4_ms setup=78.265 scan=221.661 dedup=16.940 links=8.439 group=18.778 reduce_write=33.482 campaign_write=11.812 total=389.376
+w4_worker_ms reduce=16.386 write=12.909
+w4_cgroup memory.max=12884901888
+w4_cgroup memory.peak=225005568
+w4_cgroup memory.swap.max=0
+w4_cgroup cpu.max=800000 100000

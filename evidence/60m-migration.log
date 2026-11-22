@@ -1,0 +1,7 @@
+moved 68 files, 6208509281 bytes
+RAM dataset file count: 0
+Disk /dev/disk24 ejected
+Disk /dev/disk23 ejected
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   926Gi   861Gi    13Gi    99%    2.9M  132M    2%   /System/Volumes/Data
+System-wide memory free percentage: 67%

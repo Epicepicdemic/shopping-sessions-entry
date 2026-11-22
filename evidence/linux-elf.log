@@ -1,0 +1,83 @@
+bin/shopping-w4-linux-x86_64: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, BuildID[sha1]=c6b7d4a8edcd3459086b32fb8eaa6e9ded8f8044, stripped
+6a4aca492947e44ee753ef41657ac9828f37a57d0c4f4e625dc896f8ee1a5692  bin/shopping-w4-linux-x86_64
+ELF Header:
+  Magic:   7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00
+  Class:                             ELF64
+  Data:                              2's complement, little endian
+  Version:                           1 (current)
+  OS/ABI:                            UNIX - System V
+  ABI Version:                       0
+  Type:                              DYN (Shared object file)
+  Machine:                           Advanced Micro Devices X86-64
+  Version:                           0x1
+  Entry point address:               0x22281
+  Start of program headers:          64 (bytes into file)
+  Start of section headers:          1618872 (bytes into file)
+  Flags:                             0x0
+  Size of this header:               64 (bytes)
+  Size of program headers:           56 (bytes)
+  Number of program headers:         12
+  Size of section headers:           64 (bytes)
+  Number of section headers:         24
+  Section header string table index: 23
+
+Elf file type is DYN (Shared object file)
+Entry point 0x22281
+There are 12 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x010e30 0x010e30 R   0x1000
+  LOAD           0x011000 0x0000000000011000 0x0000000000011000 0x12b47c 0x12b47c R E 0x1000
+  LOAD           0x13d000 0x000000000013d000 0x000000000013d000 0x046275 0x046275 R   0x1000
+  LOAD           0x183b60 0x0000000000184b60 0x0000000000184b60 0x007750 0x00a898 RW  0x1000
+  DYNAMIC        0x18a860 0x000000000018b860 0x000000000018b860 0x000170 0x000170 RW  0x8
+  NOTE           0x0002e0 0x00000000000002e0 0x00000000000002e0 0x000030 0x000030 R   0x8
+  NOTE           0x000310 0x0000000000000310 0x0000000000000310 0x000024 0x000024 R   0x4
+  TLS            0x183b60 0x0000000000184b60 0x0000000000184b60 0x000000 0x000010 R   0x8
+  GNU_PROPERTY   0x0002e0 0x00000000000002e0 0x00000000000002e0 0x000030 0x000030 R   0x8
+  GNU_EH_FRAME   0x14c4f0 0x000000000014c4f0 0x000000000014c4f0 0x008574 0x008574 R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0x10
+  GNU_RELRO      0x183b60 0x0000000000184b60 0x0000000000184b60 0x0074a0 0x0074a0 R   0x1
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     .note.gnu.property .note.gnu.build-id .gnu.hash .dynsym .dynstr .rela.dyn 
+   01     .init .text .fini 
+   02     .rodata .eh_frame_hdr .eh_frame .gcc_except_table 
+   03     .init_array .fini_array .data.rel.ro .dynamic .got .data .bss 
+   04     .dynamic 
+   05     .note.gnu.property 
+   06     .note.gnu.build-id 
+   07     .tbss 
+   08     .note.gnu.property 
+   09     .eh_frame_hdr 
+   10     
+   11     .init_array .fini_array .data.rel.ro .dynamic .got 
+   None   .comment .shstrtab 
+Dynamic section at offset 0x18a860 contains 19 entries:
+  Tag                Type           Name/Value
+  0x000000000000000c (INIT)         0x11000
+  0x000000000000000d (FINI)         0x13c479
+  0x0000000000000019 (INIT_ARRAY)   0x184b60
+  0x000000000000001b (INIT_ARRAYSZ) 48 (bytes)
+  0x000000000000001a (FINI_ARRAY)   0x184b90
+  0x000000000000001c (FINI_ARRAYSZ) 16 (bytes)
+  0x000000006ffffef5 (GNU_HASH)     0x338
+  0x0000000000000005 (STRTAB)       0x370
+  0x0000000000000006 (SYMTAB)       0x358
+  0x000000000000000a (STRSZ)        1 (bytes)
+  0x000000000000000b (SYMENT)       24 (bytes)
+  0x0000000000000015 (DEBUG)        0x0
+  0x0000000000000007 (RELA)         0x378
+  0x0000000000000008 (RELASZ)       68280 (bytes)
+  0x0000000000000009 (RELAENT)      24 (bytes)
+  0x000000000000001e (FLAGS)        BIND_NOW 
+  0x000000006ffffffb (FLAGS_1)      NOW PIE 
+  0x000000006ffffff9 (RELACOUNT)    2845
+  0x0000000000000000 (NULL)         0x0
+   2340e:      	vpcmpeqb	%zmm3, %zmm0, %k0
+   23415:      	vpcmpeqb	%zmm2, %zmm0, %k1
+   2341c:      	vpcmpeqb	%zmm1, %zmm0, %k2
+   23423:      	kmovq	%k0, -0x18(%rsi)
+   23429:      	kmovq	%k1, -0x10(%rsi)

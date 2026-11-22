@@ -1,1 +1,0 @@
-Events step 2: "Dedup on `event_id`. Keep only the copy with the smallest `ingest_ts`." Linked IDs: "an event or click is the person's as soon as it is parsed, whatever its own ID."

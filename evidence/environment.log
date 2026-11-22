@@ -1,0 +1,15 @@
+Apple M5 Pro
+hw.perflevel0.logicalcpu: 5
+hw.perflevel1.logicalcpu: 10
+hw.memsize: 25769803776
+Apple clang version 21.0.0 (clang-2100.4.1.1)
+Target: arm64-apple-darwin27.2.0
+Thread model: posix
+InstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
+087e5d2e079402ef5b3d88a3c349c6a8b472c64ef1464820f7067fae06235f45  work/bin/w3-native
+e3414c76c71cc66a0ec7253f9d7a7ebb27e8771a13c6cd40cd3ed904578486ba  work/bin/w4-fused-split
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   926Gi   865Gi    10Gi    99%    3.0M  109M    3%   /System/Volumes/Data
+29.5.2 aarch64 8 13569146880 cgroup=2
+linux/amd64 user=1000:1000 entrypoint=["/app/shopping-w3"]
+linux/amd64 user=1000:1000 entrypoint=["/app/shopping-w4"]

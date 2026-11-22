@@ -1,0 +1,5 @@
+Removed isolated Lima runtime.
+Removed generated inputs, temporary Parquet and reference outputs, and build workspace.
+Remaining CSV, Parquet, trace and pyc files: 0
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   926Gi   852Gi    19Gi    98%    2.9M  194M    1%   /System/Volumes/Data

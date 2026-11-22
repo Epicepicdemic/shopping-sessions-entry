@@ -1,0 +1,6 @@
+w4 scanner=scalar workers=1 event_bits=6 user_bits=5 time=compact sync=0 input_bytes=19899 user_rows=13 campaign_rows=3 peak_rss_bytes=24543232 minor_faults=2400 major_faults=3
+w4_ms setup=1.359 scan=0.466 dedup=0.091 links=0.212 group=0.117 reduce_write=0.415 campaign_write=0.148 total=2.808
+w4_worker_ms reduce=0.053 write=0.285
+user_daily: MATCH rows 13 (expected 13), missing 0, extra 0, differing 0, duplicate keys 0, expected duplicate keys 0
+campaign_daily: MATCH rows 3 (expected 3), missing 0, extra 0, differing 0, duplicate keys 0, expected duplicate keys 0
+sessions user/campaign 13/13, revenue 900/900, assists 3, credited non-organic sessions 2

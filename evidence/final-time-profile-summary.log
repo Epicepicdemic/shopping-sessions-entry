@@ -1,0 +1,52 @@
+work/w3-time.xml: 5264 samples
+  945 shopping-w3        __function::__func<w3::Engine<w3::Atom>::run(unsigned long long)::'lambda'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+  518 libsystem_kernel.dylib pread
+  516 shopping-w3        void w3::split_fields<7ul>(char const*, unsigned __int128, unsigned int, array<basic_string_view<char, char_traits<char>>, 7ul>&, bool&)
+  453 shopping-w3        scan_events [inlined]
+  418 shopping-w3        w3::Aliases::intern(w3::Id, unsigned int, w3::Keys const&)
+  315 shopping-w3        w3::KeyStore::put(basic_string_view<char, char_traits<char>>, char)
+  303 shopping-w3        w3::timestamp(basic_string_view<char, char_traits<char>>)
+  254 shopping-w3        __function::__func<w3::Engine<w3::Atom>::scan()::'lambda'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+  243 shopping-w3        __function::__func<w3::Engine<w3::Atom>::aggregate()::'lambda'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+  171 shopping-w3        w3::Dates::millis(basic_string_view<char, char_traits<char>>) const
+  155 shopping-w3        __function::__func<w3::Engine<w3::Atom>::run(unsigned long long)::'lambda0'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+  134 shopping-w3        w3::classify_neon(char const*, w3::Masks*, unsigned long)
+  106 shopping-w3        scan_rows [inlined]
+  106 shopping-w3        <deduplicated_symbol>
+   98 shopping-w3        scan_clicks [inlined]
+   97 libsystem_platform.dylib _platform_memmove
+   71 shopping-w3        void __introsort<_ClassicAlgPolicy, void w3::sort_clicks<unsigned int>(span<w3::AdClick<unsigned int>, 18446744073709551615ul>, w3::Keys const&)::'lambda'(unsigned int const&, auto const&)&, w3::AdCli
+   56 shopping-w3        w3::civil_day(int, unsigned int, unsigned int)
+   53 shopping-w3        w3::Reduce<unsigned int>::credit_many(span<w3::AdClick<unsigned int> const, 18446744073709551615ul>, w3::Campaigns&)
+   47 shopping-w3        __function::__func<w3::Engine<w3::Atom>::labels()::'lambda0'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+   24 shopping-w3        w3::UserColumns::row(int, unsigned int, unsigned int, unsigned long long, unsigned int)
+   18 shopping-w3        __wrap_iter<unsigned char*> vector<unsigned char, allocator<unsigned char>>::__insert_with_size[abi:nqe220106]<_ClassicAlgPolicy, unsigned char const*, unsigned char const*>(__wrap_iter<unsigned char 
+   15 shopping-w3        __function::__func<w3::Engine<w3::Atom>::labels()::'lambda1'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+   14 shopping-w3        void w3::field_ranges<0ul, 4ul, unsigned __int128>(char const*, unsigned __int128, unsigned int, unsigned int, array<basic_string_view<char, char_traits<char>>, 4ul>&, bool&)
+   14 shopping-w3        auto w3::Engine<w3::Atom>::scan_links(unsigned int, w3::Engine<w3::Atom>::Worker&, w3::Part const&)::'lambda'(auto const&)::operator()<array<basic_string_view<char, char_traits<char>>, 2ul>>(auto cons
+work/w4-final-time.xml: 4077 samples
+  729 w4-fused-split     __function::__func<w3::Engine<w3::Atom>::run(unsigned long long)::'lambda'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+  658 w4-fused-split     scan_events [inlined]
+  343 libsystem_kernel.dylib pread
+  308 w4-fused-split     __function::__func<w3::Engine<w3::Atom>::run(unsigned long long)::'lambda0'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+  275 w4-fused-split     w3::Names::intern(w3::Id, unsigned int, w3::Keys const&)
+  216 w4-fused-split     w3::Dates::millis(basic_string_view<char, char_traits<char>>) const
+  176 w4-fused-split     w3::Keys::put(unsigned int, basic_string_view<char, char_traits<char>>, unsigned long long&)
+  147 w4-fused-split     scan_clicks [inlined]
+  143 w4-fused-split     w3::KeyStore::put_indirect(basic_string_view<char, char_traits<char>>, unsigned long long)
+  111 w4-fused-split     w3::classify_neon(char const*, w3::Masks*, unsigned long)
+  106 w4-fused-split     __function::__func<w3::Engine<w3::Atom>::aggregate()::'lambda'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+  106 w4-fused-split     <deduplicated_symbol>
+   96 w4-fused-split     __function::__func<w3::Engine<w3::Atom>::scan()::'lambda'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+   87 w4-fused-split     w3::Engine<w3::Atom>::reduce_person(w3::Engine<w3::Atom>::Worker&, w3::Id, span<w3::Atom, 18446744073709551615ul>, span<w3::AdClick<unsigned int>, 18446744073709551615ul>)
+   56 libsystem_platform.dylib _platform_memmove
+   55 w4-fused-split     void __introsort<_ClassicAlgPolicy, void w3::sort_clicks<unsigned int>(span<w3::AdClick<unsigned int>, 18446744073709551615ul>, w3::Keys const&)::'lambda'(unsigned int const&, auto const&)&, w3::AdCli
+   52 w4-fused-split     __function::__func<w3::Engine<w3::Atom>::link_users()::'lambda0'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+   51 w4-fused-split     w3::Bins<w3::EventRef, 4096ul>::allocate()
+   41 w4-fused-split     w3::Reduce<unsigned int>::credit_many(span<w3::AdClick<unsigned int> const, 18446744073709551615ul>, w3::Campaigns&)
+   33 w4-fused-split     w3::Earliest::store(long long, w3::Buy, vector<w3::EventExtra, allocator<w3::EventExtra>>&)
+   33 w4-fused-split     w3::Engine<w3::Atom>::reduce_cells(w3::Engine<w3::Atom>::Worker&, w3::EventCells const&, span<w3::AdClick<unsigned int>, 18446744073709551615ul>)
+   32 w4-fused-split     bool w3::quote_boundaries<&w3::parity_neon(unsigned long long)>(w3::Masks const*, unsigned long)
+   15 w4-fused-split     __function::__func<w3::Engine<w3::Atom>::link_users()::'lambda1'(unsigned int, unsigned long), void (unsigned int, unsigned long)>::operator()(unsigned int&&, unsigned long&&)
+   15 w4-fused-split     __wrap_iter<unsigned char*> vector<unsigned char, allocator<unsigned char>>::__insert_with_size[abi:nqe220106]<_ClassicAlgPolicy, unsigned char const*, unsigned char const*>(__wrap_iter<unsigned char 
+   14 libsystem_platform.dylib _platform_memcmp

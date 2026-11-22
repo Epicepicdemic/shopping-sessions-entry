@@ -1,0 +1,28 @@
+info: profile set to minimal
+info: default host tuple is aarch64-apple-darwin
+info: syncing channel updates for 1.85.1-aarch64-apple-darwin
+info: latest update on 2025-03-18 for version 1.85.1 (4eb161250 2025-03-15)
+info: downloading 3 components
+info: default toolchain set to 1.85.1-aarch64-apple-darwin
+
+  1.85.1-aarch64-apple-darwin installed - rustc 1.85.1 (4eb161250 2025-03-15)
+
+
+Rust is installed now. Great!
+
+To get started you need Cargo's bin directory 
+(<repo>/work/cargo/bin)
+in your PATH
+environment variable. This has not been done automatically.
+
+To configure your current shell, you need to source
+the corresponding env file under 
+<repo>/work/cargo.
+
+Consider running the right command for your shell (note the leading DOT):
+. 
+"<repo>/work/cargo/env"
+# For sh/ash/dash/pdksh/zsh
+source 
+"<repo>/work/cargo/env.tcsh"
+# For tcsh

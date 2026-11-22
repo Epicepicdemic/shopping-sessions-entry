@@ -1,0 +1,33 @@
+Native dev
+control 7 median=0.050322 best=0.037449 rss=130875392 bytes 0.122 GiB 124.812 MiB median output=4661907
+{'setup': 6.428, 'scan': 17.788, 'dedup': 4.806, 'links': 1.172, 'group': 3.978, 'reduce_write': 6.444, 'campaign_write': 1.735, 'total': 44.644}
+candidate 7 median=0.047745 best=0.033611 rss=110804992 bytes 0.103 GiB 105.672 MiB median output=4573167
+{'setup': 6.421, 'scan': 16.662, 'dedup': 3.766, 'links': 1.114, 'group': 4.627, 'reduce_write': 7.1, 'campaign_write': 1.6, 'total': 42.664}
+paired median 1.053984
+Native 20M
+control 7 median=0.453058 best=0.438135 rss=1853390848 bytes 1.726 GiB 1767.531 MiB median output=61952951
+{'setup': 6.275, 'scan': 221.929, 'dedup': 62.742, 'links': 11.433, 'group': 58.263, 'reduce_write': 60.171, 'campaign_write': 1.14, 'total': 430.542}
+candidate 7 median=0.405207 best=0.386976 rss=1459208192 bytes 1.359 GiB 1391.609 MiB median output=59907950
+{'setup': 6.199, 'scan': 203.371, 'dedup': 45.314, 'links': 11.422, 'group': 55.977, 'reduce_write': 63.99, 'campaign_write': 1.151, 'total': 386.164}
+paired median 1.108119
+Native 60M
+control 5 median=1.892875 best=1.743554 rss=5072420864 bytes 4.724 GiB 4837.438 MiB median output=182957533
+{'setup': 7.554, 'scan': 797.447, 'dedup': 309.336, 'links': 48.111, 'group': 342.382, 'reduce_write': 232.281, 'campaign_write': 1.564, 'total': 1815.322}
+candidate 5 median=1.551688 best=1.416785 rss=4222009344 bytes 3.932 GiB 4026.422 MiB median output=175947204
+{'setup': 7.376, 'scan': 791.786, 'dedup': 165.102, 'links': 44.987, 'group': 238.645, 'reduce_write': 248.245, 'campaign_write': 1.931, 'total': 1501.152}
+paired median 1.160828
+Docker dev
+control 2 elapsed=0.284187 rss=247128064 bytes (0.230 GiB) peak=249737216 bytes (0.233 GiB)
+candidate 2 elapsed=0.348387 rss=222941184 bytes (0.208 GiB) peak=225447936 bytes (0.210 GiB)
+Docker 20M default
+control 2 elapsed=3.076243 rss=3778166784 bytes (3.519 GiB) peak=3793342464 bytes (3.533 GiB)
+candidate 2 elapsed=2.836243 rss=3420717056 bytes (3.186 GiB) peak=3434721280 bytes (3.199 GiB)
+Docker 60M APFS default
+control 1 elapsed=20.533169 rss=11111362560 bytes (10.348 GiB) peak=11152109568 bytes (10.386 GiB)
+candidate 1 elapsed=24.665732 rss=10124476416 bytes (9.429 GiB) peak=10161475584 bytes (9.464 GiB)
+Docker 60M RAM default
+control 2 elapsed=55.501410 rss=11122122752 bytes (10.358 GiB) peak=11160690688 bytes (10.394 GiB)
+candidate 2 elapsed=73.850506 rss=10125914112 bytes (9.430 GiB) peak=10163343360 bytes (9.465 GiB)
+Docker 60M RAM pread
+control 1 elapsed=52.256725 rss=4922834944 bytes (4.585 GiB) peak=11157585920 bytes (10.391 GiB)
+candidate 1 elapsed=44.933467 rss=3931557888 bytes (3.662 GiB) peak=10163564544 bytes (9.466 GiB)

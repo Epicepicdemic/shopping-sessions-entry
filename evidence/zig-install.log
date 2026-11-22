@@ -1,0 +1,9 @@
+Collecting ziglang==0.15.2
+  Downloading ziglang-0.15.2-py3-none-macosx_12_0_arm64.whl.metadata (3.2 kB)
+Downloading ziglang-0.15.2-py3-none-macosx_12_0_arm64.whl (93.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 93.0/93.0 MB 603.2 kB/s  0:02:08
+Installing collected packages: ziglang
+Successfully installed ziglang-0.15.2
+
+[notice] A new release of pip is available: 26.2.2 -> 26.3
+[notice] To update, run: <repo>/work/venv/bin/python3.12 -m pip install --upgrade pip

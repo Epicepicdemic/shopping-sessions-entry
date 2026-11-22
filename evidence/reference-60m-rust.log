@@ -1,0 +1,3 @@
+link_ms=875.687
+scanner=neon build=portable
+timing_ms: catalog=5.4 fast_prep=1.4 ev_scan_and_links=9319.1 classify=0.0 ev_dedup=1838.3 fast_dedup=0.0 cl_scan=1566.4 click_route=0.1 fast_sessions=0.0 sessions_and_user_write=809.3 cleanup_and_campaign_write=131.4 total=13671.5 fast=off fast_people=0 qb=15 l2=unknown siblings=1

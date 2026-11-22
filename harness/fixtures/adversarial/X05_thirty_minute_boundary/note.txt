@@ -1,1 +1,0 @@
-Events step 5: "A new session starts when the gap from the previous event is over 30 minutes (1,800,000 ms)."

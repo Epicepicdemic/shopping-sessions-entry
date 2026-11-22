@@ -1,0 +1,33 @@
+   Device Identifier:         disk23
+   Device Node:               /dev/disk23
+   Whole:                     Yes
+   Part of Whole:             disk23
+   Device / Media Name:       Disk Image
+
+   Volume Name:               Not applicable (no file system)
+   Mounted:                   Not applicable (no file system)
+   File System:               None
+
+   Content (IOContent):       None
+   OS Can Be Installed:       No
+   Media Type:                Generic
+   Protocol:                  Disk Image
+   SMART Status:              Not Supported
+
+   Disk Size:                 16.8 MB (16777216 Bytes) (exactly 32768 512-Byte-Units)
+   Device Block Size:         512 Bytes
+
+   Media OS Use Only:         No
+   Media Read-Only:           No
+   Volume Read-Only:          Not applicable (no file system)
+
+   Device Location:           External
+   Removable Media:           Removable
+   Media Removal:             Software-Activated
+
+   Solid State:               Info not available
+   Virtual:                   Yes
+
+Initialized /dev/rdisk23 as a 16 MB case-insensitive HFS Plus volume
+Volume W4RAMProbe on /dev/disk23 mounted
+wave-four-ram-virtiofs-probe

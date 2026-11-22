@@ -1,0 +1,3 @@
+user_daily: MATCH rows 118107 (expected 118107), missing 0, extra 0, differing 0, duplicate keys 0, expected duplicate keys 0
+campaign_daily: MATCH rows 27449 (expected 27449), missing 0, extra 0, differing 0, duplicate keys 0, expected duplicate keys 0
+sessions user/campaign 181032/181032, revenue 352767593/352767593, assists 1958238, credited non-organic sessions 111113

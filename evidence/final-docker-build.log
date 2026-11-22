@@ -1,0 +1,40 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load remote build context
+#1 DONE 0.0s
+
+#2 copy /context /
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/alpine:3.23
+#3 DONE 0.0s
+
+#4 [build 1/5] FROM docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
+#4 resolve docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 done
+#4 DONE 0.0s
+
+#5 [build 2/5] RUN apk add --no-cache build-base
+#5 CACHED
+
+#6 [build 3/5] WORKDIR /src
+#6 CACHED
+
+#7 [build 4/5] COPY proto/src/ .
+#7 DONE 0.1s
+
+#8 [build 5/5] RUN g++ -std=c++20 -O3 -DNDEBUG -march=x86-64-v2 -mtune=generic -flto -pthread -static -s     main.cpp -o /shopping-w4
+#8 6.501 lto-wrapper: warning: using serial compilation of 5 LTRANS jobs
+#8 6.502 lto-wrapper: note: see the '-flto' option documentation for more information
+#8 DONE 17.1s
+
+#9 [stage-1 1/1] COPY --from=build /shopping-w4 /app/shopping-w4
+#9 CACHED
+
+#10 exporting to image
+#10 exporting layers done
+#10 exporting manifest sha256:f334abb110ae1066a3632a664eef1b7d1b86855b8e40c9a32427d9c0e48c0622 done
+#10 exporting config sha256:79d3ff7be6bd573f254fdd10bbf8c87ea4d40c4f824236ea423682c4935cfb45 done
+#10 exporting attestation manifest sha256:1c19bc5890413978795475b57090181af0b07cb369c4d28ffc79a0a8768ceb2d done
+#10 exporting manifest list sha256:736a0d5c0f8b4fa5c523bd2bc2bd49ad9d14f1164701ee8bc3f8df0298bb31d2 done
+#10 naming to docker.io/library/shopping-w4:final done
+#10 DONE 0.0s

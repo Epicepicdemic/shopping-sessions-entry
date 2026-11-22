@@ -1,0 +1,2 @@
+time="2026-11-22T02:09:26-05:00" level=info msg="Terminal is not available, proceeding without opening an editor"
+time="2026-11-22T02:09:26-05:00" level=fatal msg="instance name `w` too long: `<repo>/l/w/ssh.sock.1234567890123456` must be less than UNIX_PATH_MAX=104 characters, but is 115"

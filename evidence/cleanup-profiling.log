@@ -1,0 +1,12 @@
+removed work/final-60m
+removed work/docker-60m
+removed work/w4-counters.trace
+removed work/w3-time.trace
+removed work/w4-direct-time.trace
+removed work/counter-metrics.xml
+removed work/counter-process.xml
+removed work/w3-time.xml
+removed work/w4-direct-time.xml
+removed work/w4-final-time.xml
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   926Gi   861Gi    13Gi    99%    2.9M  138M    2%   /System/Volumes/Data

@@ -1,0 +1,6 @@
+removed work/seed2005-20m
+removed work/final-20m
+removed work/reference20m
+removed work/docker-20m
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   926Gi   865Gi    10Gi    99%    2.9M  107M    3%   /System/Volumes/Data

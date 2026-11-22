@@ -1,0 +1,7 @@
+20M seed 2005, Wave-4 native, Xcode CPU Counters bottleneck mode
+Cycle-bearing sample intervals: 36081
+Sampled cycles: 11777845692
+Discarded Bottleneck: 0.2482 cycle-weighted fraction
+Instruction Delivery Bottleneck: 0.0270 cycle-weighted fraction
+Instruction Processing Bottleneck: 0.4424 cycle-weighted fraction
+Useful: 0.2807 cycle-weighted fraction

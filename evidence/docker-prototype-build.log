@@ -1,0 +1,67 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load remote build context
+#1 DONE 0.1s
+
+#1 [internal] load remote build context
+#1 DONE 0.1s
+
+#2 copy /context /
+#2 DONE 0.1s
+
+#3 [internal] load metadata for docker.io/library/alpine:3.23
+#3 DONE 0.1s
+
+#4 [build 1/5] FROM docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
+#4 resolve docker.io/library/alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 0.1s done
+#4 DONE 0.1s
+
+#5 [build 2/5] RUN apk add --no-cache build-base
+#5 1.371 ( 1/21) Installing libgcc (15.2.0-r2)
+#5 1.457 ( 2/21) Installing jansson (2.14.1-r0)
+#5 1.484 ( 3/21) Installing libstdc++ (15.2.0-r2)
+#5 1.667 ( 4/21) Installing zstd-libs (1.5.7-r2)
+#5 1.741 ( 5/21) Installing binutils (2.45.1-r0)
+#5 2.473 ( 6/21) Installing libmagic (5.46-r2)
+#5 2.695 ( 7/21) Installing file (5.46-r2)
+#5 2.736 ( 8/21) Installing libgomp (15.2.0-r2)
+#5 2.809 ( 9/21) Installing libatomic (15.2.0-r2)
+#5 2.842 (10/21) Installing gmp (6.3.0-r4)
+#5 2.938 (11/21) Installing isl26 (0.26-r1)
+#5 3.553 (12/21) Installing mpfr4 (4.2.2-r0)
+#5 3.768 (13/21) Installing mpc1 (1.3.1-r1)
+#5 3.834 (14/21) Installing gcc (15.2.0-r2)
+#5 86.88 (15/21) Installing libstdc++-dev (15.2.0-r2)
+#5 93.36 (16/21) Installing musl-dev (1.2.5-r24)
+#5 99.79 (17/21) Installing g++ (15.2.0-r2)
+#5 134.7 (18/21) Installing make (4.4.1-r3)
+#5 134.9 (19/21) Installing fortify-headers (1.1-r5)
+#5 134.9 (20/21) Installing patch (2.8-r0)
+#5 135.0 (21/21) Installing build-base (0.5-r3)
+#5 135.0 Executing busybox-1.37.0-r30.trigger
+#5 135.0 OK: 275.2 MiB in 37 packages
+#5 DONE 135.1s
+
+#6 [build 3/5] WORKDIR /src
+#6 DONE 0.0s
+
+#7 [build 4/5] COPY proto/src/ .
+#7 DONE 0.0s
+
+#8 [build 5/5] RUN g++ -std=c++20 -O3 -DNDEBUG -march=x86-64-v2 -mtune=generic -flto -pthread -static -s     main.cpp -o /shopping-w4
+#8 6.087 lto-wrapper: warning: using serial compilation of 5 LTRANS jobs
+#8 6.087 lto-wrapper: note: see the '-flto' option documentation for more information
+#8 DONE 16.6s
+
+#9 [stage-1 1/1] COPY --from=build /shopping-w4 /app/shopping-w4
+#9 DONE 0.0s
+
+#10 exporting to image
+#10 exporting layers 0.1s done
+#10 exporting manifest sha256:cd9babd243950aee13d41ca3df97618b18392e8a37ddba7526da217a393af65c done
+#10 exporting config sha256:b702bded6aa8016e88d09ad3cdf380cc5dd0cc695f6820c75e9dcf8f675bfe4f done
+#10 exporting attestation manifest sha256:2ee2e8ce6221b2efc4571a65ec9ad2457f33064c14fb091542cb08f59cf749a6
+#10 exporting attestation manifest sha256:2ee2e8ce6221b2efc4571a65ec9ad2457f33064c14fb091542cb08f59cf749a6 done
+#10 exporting manifest list sha256:4c177d2b005ec5bb113c719e7bfeaf7fad5d69b8e5908bcd0ccb6b9acc6dd924 done
+#10 naming to docker.io/library/shopping-w4:prototype done
+#10 DONE 0.1s

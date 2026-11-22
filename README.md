@@ -1,90 +1,75 @@
-# Shopping Sessions (Databricks)
+# Shopping Sessions v5 · Wave 4
 
-A click-stream sessionisation pipeline for the Shopping Sessions track. Entry for the Builders Buildathon, November 2026.
+This repository is our team's own Wave-4 engine for the Shopping Sessions track: a C++20 program the team wrote for the v5 data, which treats every ID as an opaque string. It replaces the team's earlier Rust entry, which stays in this repository's history. The engine uses only the C++ standard library and the operating system's interfaces. The Docker build compiles it with Alpine Linux's GCC and musl (`build-base`, base image pinned by digest). The Python tools in `proto/tools` and `proto/tests` use pyarrow and duckdb for benchmarks and comparisons. Test data comes from the organisers' v5 generator, which is not included. Paths in `evidence/` logs from the developer's machine are shortened to `<repo>` and `<home>`.
 
-## Layout
+A C++20 CSV-to-Parquet engine for the v5 contract. The engine reads opaque IDs, resolves linked IDs transitively, keeps the first ingest per event ID and writes the two Parquet tables. [Implementation](proto/src/main.cpp) · [Dev, 20M and 60M results](BREAKTHROUGH-V5-W4.md)
 
-- `fast/`: the Rust implementation (standard library only, no third-party crates). `fast/tests/extended.py` generates extra general test cases; `fast/tools/` has a timing helper and a native macOS build helper.
-- `reference/`: a slow, simple implementation of `rules.md` that is meant to be obviously correct. Every fast version is compared with it. `reference/README.md` explains how to run it and the harness, and lists the open questions about the rules.
-- `harness/`: `check.py` runs any implementation and compares its two Parquet tables with the reference, row for row. The folder also holds deliberately broken copies (`broken/`), a mutation survey (`mutants.py`), a layout scrambler (`scramble.py`) and the fixtures (`fixtures/kit`, `fixtures/adversarial`).
+## Linux x86-64
 
-The generated data sets are not in the repository.
-
-## The generator, and what the fast path relies on
-
-We used the organisers' dataset generator (`generator.zip`, Rust; not included here) to make test data, and we read its source. The fast path is built on its ID encoding:
-
-- The generator writes each event and user ID as a prefix plus the base-36 form of a 40-bit scramble of a counter. The scramble uses two fixed multipliers and a secret key per data set. The fast path contains the inverse of that scramble, with the generator's two multipliers, and recovers the keys from a sample of the input at startup.
-- It then checks everything it relies on against the data itself:
-  - every ID it decodes is in canonical form (prefix, lowercase base 36, no leading zero, below 2^40), so decoding is one-to-one;
-  - each person's IDs, and the aliases their rows use, form one link component;
-  - all of a person's events fall in one counter bucket (all copies of an event share a counter, so they always do).
-- A row or person that fails a check goes to the exact solver. So does a whole input whose IDs are not in this form, or whose keys are not found.
-
-The exact solver does not use the generator's encoding; it implements the rules for any IDs. Output is the same on either path; the fast path only changes speed. `SHOPPING_FAST=0` runs the exact solver alone.
-
-## Third-party code and libraries
-
-- **pyarrow** (Apache License 2.0). The reference uses it to write Parquet and the harness uses it to read Parquet.
-- **The organisers' starter kit fixtures.** `harness/fixtures/kit/` is an unchanged copy of the 36 edge-case fixtures from the track's starter kit. The kit's README says to copy them in when publishing a starter as its own repository.
-- **The organisers' dataset generator**, as described above. No generator code is included; the fast path uses its two scramble multipliers.
-
-No other code written before the event is used.
-
-## Build and run
-
-The Dockerfile pins its builder (`rust:1.100`) by digest and produces an image containing only three static builds of one binary: portable, x86-64-v3 and x86-64-v4. The portable build checks the CPU and runs the v3 build when the CPU supports it. The runtime runs as uid 1000 and writes only to `OUTPUT_DIR`.
+The executable accepts two positional directories or the `DATA_DIR` and `OUTPUT_DIR` environment variables. The defaults are `/data` and `/output`. Start each run with an empty output directory. [Static executable](bin/shopping-w4-linux-x86_64) · [Dockerfile](Dockerfile)
 
 ```sh
-docker build --platform linux/amd64 -t shopping-fast .
-docker run --rm --platform linux/amd64 --read-only --network none \
-  --user 1000:1000 --cpus 8 --memory 24g --memory-swap 24g \
-  --pids-limit 4096 --tmpfs /tmp:rw,size=64m \
-  -v "$DATA:/data:ro" -v "$OUT:/output" -v "$SCRATCH:/scratch" \
-  -e DATA_DIR=/data -e OUTPUT_DIR=/output -e SCRATCH_DIR=/scratch \
-  -e HOME=/scratch -e NCPU=8 -e MEM_GB=24 shopping-fast
+NCPU=8 W4_TIMING=1 bin/shopping-w4-linux-x86_64 work/input work/output
 ```
-
-Input and output directories can also be given as two positional arguments. Use a fresh output directory for each run.
-
-Switches, for measurement:
-
-| Switch | Effect |
-|---|---|
-| `SHOPPING_TIMING=1` | Logs stage times, the build and bucket width chosen, and peak RSS to stderr. |
-| `SHOPPING_FAST=0` | Runs the exact solver only. |
-| `SHOPPING_COMPACT_LINKS=0` | Builds the full exact link graph instead of the compact one (fast path only). |
-| `SHOPPING_BUILD=portable` or `v4` | Forces a build. The default is v3 when the CPU has it. |
-| `SHOPPING_QB=13`..`16` | Forces the bucket width. The default comes from the CPU's L2 size. |
-| `SHOPPING_PREAD=1` | Reads input with `pread` instead of `mmap`. |
-| `SHOPPING_USE_BINS=1` | Uses half-hour counting order instead of sorting for large histories. |
-| `SHOPPING_ASSISTS=rescan` | Uses the slower direct assist scan. |
-
-## How it works
-
-- **Scan.** Each input file is split into newline-aligned ranges. A single-pass splitter validates the CSV structure: SIMD in the v3 and v4 builds, scalar in the portable build and with `--features scalar`. IDs of up to ten supported characters pack into 60 bits; longer IDs go to byte arenas.
-- **Exact solver.**
-  - Events are deduplicated in 2,048 hash shards, keeping the earliest ingest; an invalid earliest copy is kept as a marker.
-  - Links are resolved with union-find, naming each person by the bytewise-smallest ID.
-  - Each person's events are sessionised, with latest-click attribution and assists.
-- **Fast path.**
-  - Verified rows are stored as 16-byte records in counter buckets. A row that does not fit 16 bytes, such as a purchase, keeps a 24-byte side record.
-  - Each bucket deduplicates with a direct array and sessionises its people in the same pass.
-  - Links between aliases of one decoded person form a compact graph: if they make one connected component that no other link touches, the person gets an alias mask and the bytewise-smallest name directly. Every other link goes to the exact link graph, which is always consulted first.
-  - People who fail a check go to the exact solver.
-- **Output.** Plain, uncompressed Parquet.
-
-## Tests
-
-Tests run outside the image build:
 
 ```sh
-(cd fast && cargo test --release && cargo test --release --features scalar)
-python harness/check.py fixtures harness/fixtures/kit harness/fixtures/adversarial -- /path/to/shopping-fast
-python harness/check.py data DATA_DIR --expected EXPECTED_DIR -- /path/to/shopping-fast
-python fast/tests/extended.py /path/outside/repository/extended -- /path/to/shopping-fast
+docker build --platform linux/amd64 -t shopping-w4 .
+mkdir -p work/output
+chmod a+w work/output
+docker run --rm --platform linux/amd64 --read-only --network none --user 1000:1000 \
+  --cpus 8 --memory 12g --memory-swap 12g --tmpfs /tmp:size=64m \
+  -e NCPU=8 -e W4_TIMING=1 \
+  -v "$PWD/work/input:/data:ro" \
+  -v "$PWD/work/output:/output" shopping-w4
 ```
 
-## License
+The image uses Alpine musl and a static x86-64-v2 executable. The scanner selects AVX-512BW or AVX2 after checking CPU and OS support. ARM64 builds use NEON. The CSV parser also provides a scalar path.
 
-MIT. See [LICENSE](LICENSE).
+## Native macOS build
+
+```sh
+mkdir -p work/bin work/tmp
+export TMPDIR="$PWD/work/tmp/"
+clang++ -std=c++20 -O3 -DNDEBUG -mcpu=native -flto=thin -pthread \
+  proto/src/main.cpp -o work/bin/shopping-w4
+NCPU=8 W4_TIMING=1 work/bin/shopping-w4 work/input work/output
+```
+
+| Setting | Default | Effect |
+|---|---|---|
+| `NCPU` | Up to 8 | Worker count, 1–64 |
+| `W4_IO` | `mmap` on Linux, `pread` on macOS | Input mode. Also accepts `sequential` and `willneed` for mmap advice |
+| `W4_TIMING` | 0 | Phase clocks, peak process RSS, faults and Linux cgroup counters |
+| `W4_SCALAR` | 0 | Use the scalar CSV classifier |
+| `W4_AVX2` | 0 | Bypass AVX-512 dispatch on x86-64 |
+| `W4_EVENT_BITS`, `W4_USER_BITS` | From event input bytes | Override the radix partition widths |
+| `W4_CHUNK_KIB` | 2048 | Scan job size in KiB |
+| `W4_CELL_THRESHOLD` | 16 | Minimum history size for 30-minute time cells on the compact path |
+| `W2_SYNC` | 0 | Sync each Parquet part before close |
+
+## Paired benchmarks and exact checks
+
+Use the official v5 generator. The measured datasets used seed 1 with 1M events and 250K clicks, seed 2005 with 20M and 5M, and seed 6005 with 60M and 15M. Keep one generated dataset at a time.
+
+```sh
+mkdir -p work/bin work/tmp
+export TMPDIR="$PWD/work/tmp/"
+python3 -m venv work/venv
+work/venv/bin/pip install --no-cache-dir duckdb pyarrow
+../shopping-w3/work/bin/generate --seed 2005 --events 20000000 --clicks 5000000 --output work/input
+
+NCPU=8 work/venv/bin/python -B proto/tools/bench.py work/input \
+  --temp-root work/bench --keep-first work/check --pairs 7 \
+  --candidate work/bin/shopping-w4 --control ../shopping-w3/work/bin/shopping-w3
+work/venv/bin/python -B proto/tools/compare.py work/check/candidate work/check/control --temp-root work/compare
+```
+
+The comparator checks both schemas, every keyed field, duplicate keys and cross-table totals. It accepts published CSV answers or reference Parquet. The adversarial tests cover long and embedded-NUL keys, cross-file deduplication, a 32-bit hash collision, cross-year offsets, and a link chain with a links-only canonical ID. [Adversarial input builder](proto/tests/opaque_cases.py)
+
+To run the supplied fixtures, set `CONTROL_REPO` to the team's read-only checkout containing the fixture harness and the byte-oriented Python reference.
+
+```sh
+NCPU=8 work/venv/bin/python -B "$CONTROL_REPO/harness/check.py" fixtures \
+  "$CONTROL_REPO/harness/fixtures/kit" "$CONTROL_REPO/harness/fixtures/adversarial" \
+  -- "$PWD/work/bin/shopping-w4"
+```
